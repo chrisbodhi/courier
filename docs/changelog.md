@@ -6,6 +6,7 @@
 
 - **Large JSON messages on no-PSRAM boards.** `Client::dispatchJSON`'s zero-copy parse (v0.5) never took effect: ArduinoJson 7 has no zero-copy mode, and copied each string while doubling its buffer — a 4.6 KB string field needed one contiguous 8.2 KB block mid-parse and failed as `NoMemory` on a fragmented heap. Large top-level string values are now skipped by the parse, unescaped in place in the receive buffer and linked into the document.
 - **Server-initiated close wedged the connection.** On a WebSocket close frame the ESP-IDF 4.4 client emits `WEBSOCKET_EVENT_CLOSED` (not `DISCONNECTED`) and its task exits without reconnecting. `WebSocketTransport` ignored the event, so it stayed "connected" with no socket, forever. It now reports failure immediately and the Client reconnects.
+- **`onConnected` after a transport-level reconnect.** When the ESP-IDF client reconnected underneath, the Client never left `Connected` and `onConnected` did not fire — per-session setup (a hello) never re-ran. It now fires once when the transport comes back.
 
 ### New
 
