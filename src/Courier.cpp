@@ -147,7 +147,10 @@ void Client::reportRxDrops()
     if (n == 0) continue;
     Serial.printf("[courier] %s: %u incoming message(s) dropped (out of memory or queue full)\n",
                   _transports[i].name, (unsigned)n);
-    fireErrorCallbacks("RX", "incoming message dropped");
+    char msg[48];
+    snprintf(msg, sizeof(msg), n == 1 ? "1 incoming message dropped"
+                                      : "%u incoming messages dropped", (unsigned)n);
+    fireErrorCallbacks("RX", msg);
   }
 }
 
@@ -610,10 +613,18 @@ void Client::dispatchJSON(const char* transportName, const char* payload, size_t
     // Not JSON — drop. Per-transport hooks still saw the raw bytes.
     Serial.printf("[courier] %s: dropping non-JSON payload (%u bytes): %s\n",
                   transportName, (unsigned)length, err.c_str());
-    // Non-JSON text is legitimate on a raw-hook transport; running out of
-    // memory never is, and the sender has no other way to learn of it.
-    if (err == DeserializationError::NoMemory)
-      fireErrorCallbacks("RX", "incoming message dropped: out of memory");
+    // Plain text is legitimate on a raw-hook transport, so it drops quietly.
+    // A message that set out to be JSON and failed — truncated, badly
+    // escaped, or too big for the memory left — is a lost message the
+    // sender has no other way to learn of.
+    const char* p = payload;
+    while (p < payload + length && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    bool looksLikeJson = p < payload + length && (*p == '{' || *p == '[');
+    if (err == DeserializationError::NoMemory || looksLikeJson) {
+      char msg[64];
+      snprintf(msg, sizeof(msg), "incoming message dropped: %s", err.c_str());
+      fireErrorCallbacks("RX", msg);
+    }
     return;
   }
   // Each value's unescape stays within its own quotes, so the keys (which

@@ -292,9 +292,31 @@ void test_rx_drops_reported_through_on_error() {
     for (int i = 0; i < 10; i++) mock->simulateTextMessage("{\"type\":\"burst\"}");  // queue depth 8
     courier->loop();
     TEST_ASSERT_EQUAL(1, errors.size());
-    TEST_ASSERT_EQUAL_STRING("RX:incoming message dropped", errors[0].c_str());
+    TEST_ASSERT_EQUAL_STRING("RX:2 incoming messages dropped", errors[0].c_str());
     courier->loop();  // counter was consumed: no repeat report
     TEST_ASSERT_EQUAL(1, errors.size());
+}
+
+// A message that set out to be JSON and failed to parse is reported; plain
+// text (legitimate on raw-hook transports) is not.
+void test_malformed_json_reported_plain_text_not() {
+    std::vector<std::string> errors;
+    int delivered = 0;
+    courier->setDefaultTransport("ws");
+    courier->onMessage([&](const char*, const char*, JsonDocument&) { delivered++; });
+    courier->onError([&](const char* category, const char* message) {
+        errors.push_back(std::string(category) + ":" + message);
+    });
+    advanceToConnected();
+    auto* mock = MockWebSocketClient::lastInstance();
+    mock->simulateTextMessage("hello there");                       // plain text
+    mock->simulateTextMessage("  {\"type\":\"app\",\"code\":\"x");  // truncated
+    mock->simulateTextMessage("{\"type\":\"app\",\"code\":\"\\q\"}");  // bad escape
+    courier->loop();
+    TEST_ASSERT_EQUAL(0, delivered);
+    TEST_ASSERT_EQUAL(2, errors.size());
+    TEST_ASSERT_EQUAL_STRING("RX:incoming message dropped: IncompleteInput", errors[0].c_str());
+    TEST_ASSERT_EQUAL_STRING("RX:incoming message dropped: InvalidInput", errors[1].c_str());
 }
 
 void test_suspend_resume() {
@@ -945,6 +967,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_large_string_with_invalid_escape_is_dropped);
     RUN_TEST(test_multiple_large_string_fields);
     RUN_TEST(test_rx_drops_reported_through_on_error);
+    RUN_TEST(test_malformed_json_reported_plain_text_not);
     RUN_TEST(test_suspend_resume);
     RUN_TEST(test_on_error_callback_registered);
     RUN_TEST(test_connection_change_fires_on_setup);

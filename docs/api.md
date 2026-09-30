@@ -326,7 +326,7 @@ Booting -> WifiConnecting -> WifiConnected -> TransportsConnecting -> Connected
                                                ConnectionFailed
 ```
 
-`onConnectionChange` fires on every transition. `onError` fires alongside transitions caused by failures, with a category string (`"WIFI"`, `"TRANSPORT"`, `"TIME_SYNC"`, etc.) and a reason. Category `"RX"` reports an incoming message that was dropped before dispatch — out of memory (receive buffer or JSON document) or a full receive queue — so the sender can be told to retry.
+`onConnectionChange` fires on every transition. `onError` fires alongside transitions caused by failures, with a category string (`"WIFI"`, `"TRANSPORT"`, `"TIME_SYNC"`, etc.) and a reason. Category `"RX"` reports incoming messages dropped before dispatch, so the sender can be told to retry: out of memory or a full receive queue (`"3 incoming messages dropped"`), or a message that began as JSON (`{` or `[`) but failed to parse (`"incoming message dropped: InvalidInput"` — also `IncompleteInput`, `NoMemory`, `TooDeep`). Plain non-JSON text is not reported: raw-hook transports receive it legitimately.
 
 `onConnected` fires on entering `Connected`, and again when a persistent transport comes back after dropping while the Client stayed `Connected` (the ESP-IDF WebSocket/MQTT clients reconnect underneath on their own). Put per-session setup — a hello, a subscription — there; it re-runs for every new session.
 

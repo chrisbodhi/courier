@@ -10,7 +10,7 @@
 
 ### New
 
-- `onError` category `"RX"`: an incoming message was dropped (allocation failure, full receive queue, JSON `NoMemory`). Previously only an `ESP_LOGW`, compiled out at the default Arduino log level.
+- `onError` category `"RX"`: incoming messages were dropped — allocation failure or a full receive queue (with the count), or a message that began as JSON but failed to parse (with ArduinoJson's reason). Previously only an `ESP_LOGW`, compiled out at the default Arduino log level, or nothing at all.
 
 ## v0.8.1
 
