@@ -93,13 +93,24 @@ courier.suspend();
 courier.resume();
 ```
 
-`reconnect()` is a manual trigger for the connection-recovery state machine. It tears down all transports, fires `onDisconnected`, and transitions to `State::Reconnecting`. The state-machine handler then adapts: if WiFi is down it re-runs the WiFi connect step; if WiFi is fine it retries transports directly. `onTransportsWillConnect` re-fires on the way back through `TransportsConnecting`.
+`reconnect()` is a manual trigger for the connection-recovery state machine. It tears down all transports, fires `onDisconnected`, and transitions to `State::Reconnecting`. The state-machine handler then adapts: if WiFi is down it re-runs the WiFi connect step; if WiFi is fine it retries transports directly. `onNetworkReady` and `onTransportsWillConnect` re-fire on the way back through `NetworkReady`.
 
 ```cpp
 courier.reconnect();   // re-registration / "kick the connection"
 ```
 
 Use it for re-registration flows, manual reconnect triggers, or recovering from application-level state errors that warrant a fresh connect cycle.
+
+`enterNetworkReady()` tears down all transports, fires `onDisconnected`, and transitions to `State::NetworkReady`, keeping WiFi and the clock: no WiFi reconnect, no backoff, no time sync. The `onNetworkReady` hook runs on the next `loop()`; when it returns, the machine continues through `onTransportsWillConnect` and `TransportsConnecting` as on boot. Valid from `Connected` and `TransportsConnecting`; from any other state it returns `false` and does nothing.
+
+```cpp
+courier.onNetworkReady([]() {
+  if (!downloadPending) return;
+  // HTTPS download with no other TLS session open
+});
+
+if (courier.enterNetworkReady()) downloadPending = true;
+```
 
 ### State
 
@@ -206,6 +217,7 @@ courier.onError([](const char* category, const char* msg) { /* any failure */ })
 
 // Lifecycle hooks. Use these for token exchange or registration that must
 // complete before transports connect / right after they connect.
+courier.onNetworkReady([]() { /* WiFi up, clock synced, no transports */ });
 courier.onTransportsWillConnect([]() { /* before transports start */ });
 courier.onTransportsDidConnect([]()  { /* after transports connect */ });
 ```
@@ -310,6 +322,7 @@ enum class Courier::State {
     Booting,
     WifiConnecting,
     WifiConnected,
+    NetworkReady,
     WifiConfiguring,
     TransportsConnecting,
     Connected,
@@ -319,12 +332,16 @@ enum class Courier::State {
 ```
 
 ```
-Booting -> WifiConnecting -> WifiConnected -> TransportsConnecting -> Connected
-                                                       ^                  |
-                                                  Reconnecting <----------+
-                                                       |
-                                               ConnectionFailed
+Booting -> WifiConnecting -> WifiConnected -> NetworkReady -> TransportsConnecting -> Connected
+                                   ^                ^                                     |
+                                   |                +-------- enterNetworkReady() --------+
+                                   |                                                      |
+                             Reconnecting <-----------------------------------------------+
+                                   |
+                           ConnectionFailed
 ```
+
+`NetworkReady` is where WiFi is up and time sync has been attempted, so TLS can validate certificates, but no persistent transport is running. `onNetworkReady` runs there, blocking, on every entry — boot, each reconnect cycle that finds WiFi up, and `enterNetworkReady()`. A hook with nothing to do should return immediately.
 
 `onConnectionChange` fires on every transition. `onError` fires alongside transitions caused by failures, with a category string (`"WIFI"`, `"TRANSPORT"`, `"TIME_SYNC"`, etc.) and a reason.
 

@@ -75,7 +75,8 @@ static Client* courier = nullptr;
 static void advanceToConnected() {
     courier->setup();
     courier->loop();  // WIFI_CONNECTING -> WIFI_CONNECTED
-    courier->loop();  // WIFI_CONNECTED -> TRANSPORTS_CONNECTING
+    courier->loop();  // WIFI_CONNECTED -> NETWORK_READY
+    courier->loop();  // NETWORK_READY -> TRANSPORTS_CONNECTING
     courier->loop();  // TRANSPORTS_CONNECTING: calls begin(), creates mock WS client
 
     auto* mock = MockWebSocketClient::lastInstance();
@@ -94,6 +95,7 @@ void setUp(void) {
     UTC.setMockNow(0);  // UTC is a global; a prior test's mock-now would re-trigger the bridge
     g_mockWaitForSyncResult = false;   // NTP "times out" -> Date fallback
     g_lastWaitForSyncTimeout = 0;
+    g_mockWaitForSyncCount = 0;
     g_mockEventsCount = 0;
     Serial.stopCapture();
 
@@ -250,12 +252,14 @@ void test_connection_change_fires_through_to_connected() {
     });
     advanceToConnected();
 
-    // Should see: WifiConnecting, WifiConnected, TransportsConnecting, Connected
-    TEST_ASSERT_TRUE(states.size() >= 4);
+    // Should see: WifiConnecting, WifiConnected, NetworkReady,
+    // TransportsConnecting, Connected
+    TEST_ASSERT_TRUE(states.size() >= 5);
     TEST_ASSERT_TRUE(states[0] == State::WifiConnecting);
     TEST_ASSERT_TRUE(states[1] == State::WifiConnected);
-    TEST_ASSERT_TRUE(states[2] == State::TransportsConnecting);
-    TEST_ASSERT_TRUE(states[3] == State::Connected);
+    TEST_ASSERT_TRUE(states[2] == State::NetworkReady);
+    TEST_ASSERT_TRUE(states[3] == State::TransportsConnecting);
+    TEST_ASSERT_TRUE(states[4] == State::Connected);
 }
 
 void test_no_builtin_ws_when_host_null() {
@@ -428,7 +432,8 @@ void test_dns_flush_on_transports_connecting_entry() {
     int before = dnsFlushCountForTests;
     courier->setup();
     courier->loop();  // WifiConnecting -> WifiConnected
-    courier->loop();  // WifiConnected -> TransportsConnecting
+    courier->loop();  // WifiConnected -> NetworkReady
+    courier->loop();  // NetworkReady -> TransportsConnecting
     courier->loop();  // TransportsConnecting entry: flush, then begin()
     TEST_ASSERT_EQUAL(before + 1, dnsFlushCountForTests);
     // Subsequent loops in the same connect cycle must NOT flush again.
@@ -453,7 +458,8 @@ void test_https_only_no_auto_ws_and_send_routes() {
 
     courier->setup();
     courier->loop();  // WifiConnecting -> WifiConnected
-    courier->loop();  // WifiConnected -> TransportsConnecting
+    courier->loop();  // WifiConnected -> NetworkReady
+    courier->loop();  // NetworkReady -> TransportsConnecting
     courier->loop();  // begin() -> HttpTransport connected (WiFi up)
     courier->loop();  // -> Connected
     TEST_ASSERT_TRUE(courier->isConnected());
@@ -485,6 +491,7 @@ void test_https_reply_reaches_client_onmessage() {
     courier->loop();
     courier->loop();
     courier->loop();
+    courier->loop();
 
     MockHttpClient::ScriptStep reply;
     reply.status = 200;
@@ -508,6 +515,7 @@ void test_auto_ws_still_registers_for_default_and_explicit_ws() {
     courier->loop();
     courier->loop();
     courier->loop();
+    courier->loop();
     TEST_ASSERT_EQUAL(1, MockWebSocketClient::instanceCount());
 
     // Explicit defaultTransport = "ws" must also auto-register (not just the
@@ -519,6 +527,7 @@ void test_auto_ws_still_registers_for_default_and_explicit_ws() {
     cfg2.defaultTransport = "ws";
     courier = new Client(cfg2);
     courier->setup();
+    courier->loop();
     courier->loop();
     courier->loop();
     courier->loop();
@@ -771,6 +780,152 @@ void test_null_default_transport_closes_receive_lane(void) {
     TEST_ASSERT_EQUAL_INT(0, count);
 }
 
+// --- NetworkReady ---
+
+void test_boot_passes_through_network_ready() {
+    std::vector<State> states;
+    courier->onConnectionChange([&](State s) { states.push_back(s); });
+
+    courier->setup();
+    courier->loop();  // WifiConnecting -> WifiConnected
+    courier->loop();  // WifiConnected -> NetworkReady
+    TEST_ASSERT_TRUE(courier->getState() == State::NetworkReady);
+    courier->loop();  // NetworkReady -> TransportsConnecting
+    TEST_ASSERT_TRUE(courier->getState() == State::TransportsConnecting);
+
+    TEST_ASSERT_EQUAL(4, states.size());
+    TEST_ASSERT_TRUE(states[1] == State::WifiConnected);
+    TEST_ASSERT_TRUE(states[2] == State::NetworkReady);
+    TEST_ASSERT_TRUE(states[3] == State::TransportsConnecting);
+}
+
+void test_network_ready_hook_fires_once_before_will_connect() {
+    std::vector<std::string> order;
+    State stateInHook = State::Booting;
+    courier->onNetworkReady([&]() {
+        order.push_back("ready");
+        stateInHook = courier->getState();
+    });
+    courier->onTransportsWillConnect([&]() { order.push_back("will"); });
+
+    advanceToConnected();
+    courier->loop();
+    courier->loop();
+
+    TEST_ASSERT_TRUE(courier->getState() == State::Connected);
+    TEST_ASSERT_EQUAL(2, order.size());
+    TEST_ASSERT_EQUAL_STRING("ready", order[0].c_str());
+    TEST_ASSERT_EQUAL_STRING("will", order[1].c_str());
+    TEST_ASSERT_TRUE(stateInHook == State::NetworkReady);
+}
+
+void test_no_network_ready_hook_still_connects() {
+    advanceToConnected();
+    TEST_ASSERT_TRUE(courier->getState() == State::Connected);
+}
+
+void test_enter_network_ready_from_connected() {
+    int readyCount = 0;
+    int willConnectCount = 0;
+    int disconnectedCount = 0;
+    courier->onNetworkReady([&]() { readyCount++; });
+    courier->onTransportsWillConnect([&]() { willConnectCount++; });
+    courier->onDisconnected([&]() { disconnectedCount++; });
+
+    advanceToConnected();
+    TEST_ASSERT_EQUAL(1, readyCount);
+    TEST_ASSERT_EQUAL(1, willConnectCount);
+    TEST_ASSERT_EQUAL(1, g_mockWaitForSyncCount);
+    int httpBefore = MockHttpClient::performCount();
+
+    TEST_ASSERT_TRUE(courier->enterNetworkReady());
+    TEST_ASSERT_TRUE(courier->getState() == State::NetworkReady);
+    TEST_ASSERT_FALSE(courier->isConnected());  // transports torn down
+    TEST_ASSERT_EQUAL(1, disconnectedCount);
+    TEST_ASSERT_EQUAL(1, readyCount);  // hook runs on the next loop()
+
+    courier->loop();  // NetworkReady -> TransportsConnecting
+    TEST_ASSERT_EQUAL(2, readyCount);
+    TEST_ASSERT_EQUAL(2, willConnectCount);
+    TEST_ASSERT_TRUE(courier->getState() == State::TransportsConnecting);
+
+    courier->loop();  // begin(): a fresh WS client
+    TEST_ASSERT_EQUAL(2, MockWebSocketClient::instanceCount());
+    MockWebSocketClient::lastInstance()->simulateConnect();
+    courier->loop();
+    TEST_ASSERT_TRUE(courier->getState() == State::Connected);
+
+    // WiFi and the clock were kept: no second time sync.
+    TEST_ASSERT_EQUAL(1, g_mockWaitForSyncCount);
+    TEST_ASSERT_EQUAL(httpBefore, MockHttpClient::performCount());
+}
+
+void test_enter_network_ready_from_transports_connecting() {
+    courier->setup();
+    courier->loop();
+    courier->loop();
+    courier->loop();
+    TEST_ASSERT_TRUE(courier->getState() == State::TransportsConnecting);
+    TEST_ASSERT_TRUE(courier->enterNetworkReady());
+    TEST_ASSERT_TRUE(courier->getState() == State::NetworkReady);
+}
+
+void test_enter_network_ready_refused_outside_transport_states() {
+    TEST_ASSERT_FALSE(courier->enterNetworkReady());  // Booting
+    TEST_ASSERT_TRUE(courier->getState() == State::Booting);
+
+    courier->setup();
+    TEST_ASSERT_FALSE(courier->enterNetworkReady());  // WifiConnecting
+    TEST_ASSERT_TRUE(courier->getState() == State::WifiConnecting);
+
+    courier->loop();
+    courier->loop();
+    TEST_ASSERT_FALSE(courier->enterNetworkReady());  // NetworkReady
+    TEST_ASSERT_TRUE(courier->getState() == State::NetworkReady);
+
+    courier->loop();
+    courier->loop();
+    MockWebSocketClient::lastInstance()->simulateConnect();
+    courier->loop();
+    courier->reconnect();
+    int disconnectedCount = 0;
+    courier->onDisconnected([&]() { disconnectedCount++; });
+    TEST_ASSERT_FALSE(courier->enterNetworkReady());  // Reconnecting
+    TEST_ASSERT_TRUE(courier->getState() == State::Reconnecting);
+    TEST_ASSERT_EQUAL(0, disconnectedCount);
+}
+
+void test_reconnecting_with_wifi_up_reenters_network_ready() {
+    int readyCount = 0;
+    courier->onNetworkReady([&]() { readyCount++; });
+
+    advanceToConnected();
+    TEST_ASSERT_EQUAL(1, readyCount);
+
+    courier->reconnect();
+    _mock_millis += 5001;  // past the backoff interval
+    courier->loop();  // Reconnecting -> WifiConnected (WiFi OK)
+    TEST_ASSERT_TRUE(courier->getState() == State::WifiConnected);
+    courier->loop();  // WifiConnected -> NetworkReady
+    TEST_ASSERT_TRUE(courier->getState() == State::NetworkReady);
+    courier->loop();  // hook, then TransportsConnecting
+    TEST_ASSERT_EQUAL(2, readyCount);
+    TEST_ASSERT_TRUE(courier->getState() == State::TransportsConnecting);
+}
+
+void test_network_ready_hook_can_redirect_the_machine() {
+    courier->onNetworkReady([&]() { courier->reconnect(); });
+    int willConnectCount = 0;
+    courier->onTransportsWillConnect([&]() { willConnectCount++; });
+
+    courier->setup();
+    courier->loop();
+    courier->loop();
+    courier->loop();  // hook calls reconnect()
+    TEST_ASSERT_TRUE(courier->getState() == State::Reconnecting);
+    TEST_ASSERT_EQUAL(0, willConnectCount);
+}
+
 int main(int argc, char** argv) {
     UNITY_BEGIN();
 
@@ -818,6 +973,15 @@ int main(int argc, char** argv) {
     RUN_TEST(test_non_default_transport_still_delivers_raw_hook);
     RUN_TEST(test_setdefaulttransport_switches_dispatch_at_runtime);
     RUN_TEST(test_null_default_transport_closes_receive_lane);
+
+    RUN_TEST(test_boot_passes_through_network_ready);
+    RUN_TEST(test_network_ready_hook_fires_once_before_will_connect);
+    RUN_TEST(test_no_network_ready_hook_still_connects);
+    RUN_TEST(test_enter_network_ready_from_connected);
+    RUN_TEST(test_enter_network_ready_from_transports_connecting);
+    RUN_TEST(test_enter_network_ready_refused_outside_transport_states);
+    RUN_TEST(test_reconnecting_with_wifi_up_reenters_network_ready);
+    RUN_TEST(test_network_ready_hook_can_redirect_the_machine);
 
     return UNITY_END();
 }

@@ -121,6 +121,9 @@ void Client::loop()
   case State::WifiConnected:
     handleWifiConnectedState();
     break;
+  case State::NetworkReady:
+    handleNetworkReadyState();
+    break;
   case State::TransportsConnecting:
     handleTransportsConnectingState();
     break;
@@ -227,6 +230,16 @@ void Client::handleWifiConnectedState()
     }
     _timeSyncAttempted = true;
   }
+
+  transitionTo(State::NetworkReady);
+}
+
+void Client::handleNetworkReadyState()
+{
+  fireNetworkReadyHooks();
+
+  // The hook may have moved the machine on (e.g. by calling reconnect()).
+  if (_state != State::NetworkReady) return;
 
   // Fire onTransportsWillConnect hooks (e.g. registration)
   fireWillConnectHooks();
@@ -705,6 +718,19 @@ void Client::reconnect()
   transitionTo(State::Reconnecting);
 }
 
+bool Client::enterNetworkReady()
+{
+  if (_state != State::Connected && _state != State::TransportsConnecting) {
+    return false;
+  }
+  Serial.println("[courier] Entering NetworkReady - tearing down transports");
+  teardownAllTransports();
+  _reconnect.disconnectedCallbacksFired = true;
+  fireDisconnectedCallbacks();
+  transitionTo(State::NetworkReady);
+  return true;
+}
+
 // --- State queries ---
 
 bool Client::isConnected() const
@@ -756,6 +782,11 @@ void Client::onError(ErrorCallback cb)
   _errorCallback = cb;
 }
 
+void Client::onNetworkReady(Callback cb)
+{
+  _networkReadyHook = cb;
+}
+
 void Client::onTransportsWillConnect(Callback cb)
 {
   _willConnectHook = cb;
@@ -792,6 +823,11 @@ void Client::transitionTo(State newState)
 void Client::fireConnectionChangeCallbacks()
 {
   if (_connectionChangeCallback) _connectionChangeCallback(_state);
+}
+
+void Client::fireNetworkReadyHooks()
+{
+  if (_networkReadyHook) _networkReadyHook();
 }
 
 void Client::fireWillConnectHooks()

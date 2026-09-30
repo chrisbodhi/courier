@@ -207,14 +207,18 @@ courier.onConfigureWiFi([](WiFiManager& wm) { });
 ## Connectivity state machine
 
 ```
-Booting -> WifiConnecting -> WifiConnected -> TransportsConnecting -> Connected
-                                                     ^                    |
-                                                Reconnecting <-----------+
-                                                     |
-                                             ConnectionFailed
+Booting -> WifiConnecting -> WifiConnected -> NetworkReady -> TransportsConnecting -> Connected
+                                   ^                ^                                     |
+                                   |                +-------- enterNetworkReady() --------+
+                                   |                                                      |
+                             Reconnecting <-----------------------------------------------+
+                                   |
+                           ConnectionFailed
 ```
 
 `onConnectionChange` fires at each state transition. `onError` fires alongside transitions caused by failures, providing a category and reason (e.g. `"WIFI"`, `"connection lost"`).
+
+`NetworkReady` is the point where WiFi is up and the clock is synced (so TLS can validate certificates) but no persistent transport is running. `onNetworkReady` runs there on every entry, blocking, before `onTransportsWillConnect`. `enterNetworkReady()` returns to it from `Connected` or `TransportsConnecting`, tearing the transports down and keeping WiFi — for work that needs the network but not the transports, such as a large HTTPS download that cannot share RAM with a second TLS session.
 
 ## Key design constraints
 

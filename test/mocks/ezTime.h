@@ -43,10 +43,13 @@ inline timeStatus_t timeStatus() { return g_mockTimeStatus; }
 // Default false: NTP "times out", so existing tests exercise the HTTP Date
 // fallback path unchanged. g_lastWaitForSyncTimeout records the bound passed
 // — waitForSync(0) blocks forever in real ezTime, so tests assert it's set.
+// g_mockWaitForSyncCount counts calls.
 inline bool g_mockWaitForSyncResult = false;
 inline uint16_t g_lastWaitForSyncTimeout = 0;
+inline int g_mockWaitForSyncCount = 0;
 inline bool waitForSync(uint16_t timeout = 0) {
     g_lastWaitForSyncTimeout = timeout;
+    g_mockWaitForSyncCount++;
     return g_mockWaitForSyncResult;
 }
 inline bool updateNTP() { return true; }

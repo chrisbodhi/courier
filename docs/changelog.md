@@ -1,6 +1,12 @@
 # Changelog
 
-## v0.8.1
+## v0.9.0
+
+### New
+
+- `State::NetworkReady`, between `WifiConnected` and `TransportsConnecting`: WiFi is up and time sync has been attempted, and no persistent transport is running. Every connect cycle passes through it, so boot and each reconnect that finds WiFi up take one more `loop()` tick to reach `TransportsConnecting`.
+- `Client::onNetworkReady(cb)` — single-slot lifecycle hook run in `NetworkReady` on every entry, before `onTransportsWillConnect`. Blocking: the machine stays in `NetworkReady` until it returns.
+- `Client::enterNetworkReady()` — tears down all transports, fires `onDisconnected` and transitions to `NetworkReady`, keeping WiFi and the clock (no backoff, no time sync). Valid from `Connected` and `TransportsConnecting`; returns `false` from any other state. For work that needs the network but not the transports, such as a large HTTPS download that cannot share RAM with a second TLS session.
 
 ### Fixed
 
