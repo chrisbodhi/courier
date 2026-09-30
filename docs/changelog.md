@@ -4,16 +4,18 @@
 
 ### New
 
-- `State::NetworkReady`, between `WifiConnected` and `TransportsConnecting`: WiFi is up and time sync has been attempted, and no persistent transport is running. Every connect cycle passes through it, so boot and each reconnect that finds WiFi up take one more `loop()` tick to reach `TransportsConnecting`.
+- `State::NetworkReady`, between `WifiConnected` and `TransportsConnecting` in the lifecycle: WiFi is up and time sync has been attempted, and no persistent transport is running. If WiFi is down on entry, or drops while `onNetworkReady` runs, the machine returns to `WifiConnecting` instead of starting transports on a dead link.
 - `Client::onNetworkReady(cb)` — single-slot lifecycle hook run in `NetworkReady` on every entry, before `onTransportsWillConnect`. Blocking: the machine stays in `NetworkReady` until it returns.
 - `Client::enterNetworkReady()` — tears down all transports, fires `onDisconnected` and transitions to `NetworkReady`, keeping WiFi and the clock (no backoff, no time sync). Valid from `Connected` and `TransportsConnecting`; returns `false` from any other state. For work that needs the network but not the transports, such as a large HTTPS download that cannot share RAM with a second TLS session.
 
----
+### Upgrading notes
 
-## v0.8.1
+- `State` gains a value, declared last so existing values keep their numbers. An exhaustive `switch` over `State` with no `default` now warns under `-Wswitch`.
+- Every connect cycle passes through `NetworkReady`: boot and each reconnect that finds WiFi up take one more `loop()` tick to reach `TransportsConnecting`, and fire one more `onConnectionChange`.
 
 ### Fixed
 
+- An `onTransportsDidConnect` hook, or an `onConnectionChange` callback for `Connected`, that moves the machine on (with `reconnect()` or `enterNetworkReady()`) is no longer overwritten. The `Connected` transition and `onConnected` are skipped, where before the client was left in `Connected` with no transport running.
 - WiFi joins the strongest access point for the SSID. The Arduino default, `WIFI_FAST_SCAN`, joins the first matching AP heard, starting from the channel stored at the last connection, so a device that once joined a distant AP kept rejoining it on every boot and reconnect. `Client` now sets an all-channel scan sorted by signal, both for `WiFi.begin(ssid, pass)` (credentials from the portal) and in the stored STA config that `WiFiManager::autoConnect()` and the Arduino core's auto-reconnect reuse. It is applied before every `autoConnect()`, so Courier's WiFi reconnect path re-picks the AP too. A BSSID pinned by the application is left in place.
 
 ### Known limits

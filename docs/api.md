@@ -101,11 +101,12 @@ courier.reconnect();   // re-registration / "kick the connection"
 
 Use it for re-registration flows, manual reconnect triggers, or recovering from application-level state errors that warrant a fresh connect cycle.
 
-`enterNetworkReady()` tears down all transports, fires `onDisconnected`, and transitions to `State::NetworkReady`, keeping WiFi and the clock: no WiFi reconnect, no backoff, no time sync. The `onNetworkReady` hook runs on the next `loop()`; when it returns, the machine continues through `onTransportsWillConnect` and `TransportsConnecting` as on boot. Valid from `Connected` and `TransportsConnecting`; from any other state it returns `false` and does nothing.
+`enterNetworkReady()` tears down all transports, fires `onDisconnected`, and transitions to `State::NetworkReady`, keeping WiFi and the clock: no WiFi reconnect, no backoff, no time sync. The `onNetworkReady` hook runs on the next `loop()`; when it returns, the machine continues through `onTransportsWillConnect` and `TransportsConnecting` as on boot. Valid from `Connected` and `TransportsConnecting`; from any other state it returns `false` and does nothing. Called mid-handshake (from `TransportsConnecting`), the teardown can block until a transport's stop call returns, up to its network timeout.
 
 ```cpp
 courier.onNetworkReady([]() {
   if (!downloadPending) return;
+  downloadPending = false;  // the hook re-fires on every later reconnect
   // HTTPS download with no other TLS session open
 });
 
@@ -322,12 +323,12 @@ enum class Courier::State {
     Booting,
     WifiConnecting,
     WifiConnected,
-    NetworkReady,
     WifiConfiguring,
     TransportsConnecting,
     Connected,
     Reconnecting,
     ConnectionFailed,
+    NetworkReady,  // last to keep existing values; lifecycle: WifiConnected -> NetworkReady -> TransportsConnecting
 };
 ```
 
@@ -341,7 +342,7 @@ Booting -> WifiConnecting -> WifiConnected -> NetworkReady -> TransportsConnecti
                            ConnectionFailed
 ```
 
-`NetworkReady` is where WiFi is up and time sync has been attempted, so TLS can validate certificates, but no persistent transport is running. `onNetworkReady` runs there, blocking, on every entry — boot, each reconnect cycle that finds WiFi up, and `enterNetworkReady()`. A hook with nothing to do should return immediately.
+`NetworkReady` is where WiFi is up and time sync has been attempted, so TLS can validate certificates, but no persistent transport is running. `onNetworkReady` runs there, blocking, on every entry — boot, each reconnect cycle that finds WiFi up, and `enterNetworkReady()`. A hook with nothing to do should return immediately. If WiFi is down when `NetworkReady` is entered, or drops while the hook runs, the machine goes back to `WifiConnecting` (re-attempting time sync) instead of starting transports; `onDisconnected` does not fire again.
 
 `onConnectionChange` fires on every transition. `onError` fires alongside transitions caused by failures, with a category string (`"WIFI"`, `"TRANSPORT"`, `"TIME_SYNC"`, etc.) and a reason.
 

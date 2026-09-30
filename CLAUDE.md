@@ -43,9 +43,9 @@ Booting → WifiConnecting → WifiConnected → NetworkReady → TransportsConn
                          ConnectionFailed
 ```
 
-State values are `enum class Courier::State` with PascalCase names: `Booting`, `WifiConnecting`, `WifiConnected`, `NetworkReady`, `WifiConfiguring`, `TransportsConnecting`, `Connected`, `Reconnecting`, `ConnectionFailed`.
+State values are `enum class Courier::State` with PascalCase names: `Booting`, `WifiConnecting`, `WifiConnected`, `WifiConfiguring`, `TransportsConnecting`, `Connected`, `Reconnecting`, `ConnectionFailed`, `NetworkReady`. `NetworkReady` is declared last so the older values keep their numbers; its lifecycle position is the diagram's.
 
-`NetworkReady`: WiFi up, time sync attempted, no persistent transport running. The `onNetworkReady` hook runs there (blocking) on every entry, then `onTransportsWillConnect` fires on the way to `TransportsConnecting`. `enterNetworkReady()` returns there from `Connected`/`TransportsConnecting` without touching WiFi.
+`NetworkReady`: WiFi up, time sync attempted, no persistent transport running. The `onNetworkReady` hook runs there (blocking) on every entry, then `onTransportsWillConnect` fires on the way to `TransportsConnecting`. `enterNetworkReady()` returns there from `Connected`/`TransportsConnecting` without touching WiFi. WiFi down on entry or after the hook sends the machine back to `WifiConnecting`. The connect handler re-checks the state after `onTransportsDidConnect` and after the `Connected` transition, so a hook or `onConnectionChange` callback that moves the machine on is not overwritten.
 
 WiFi health monitoring checks status every 5s. Transport self-healing: WS and MQTT use ESP-IDF auto-reconnect; if a transport stays disconnected for 60s it reports failure. When all persistent transports fail, `Courier::Client` escalates to full WiFi reconnection. Reconnection uses exponential backoff (5s-60s) with a hard limit of 10 attempts.
 
