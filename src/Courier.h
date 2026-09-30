@@ -23,6 +23,9 @@ enum class State {
   Connected,
   Reconnecting,
   ConnectionFailed,
+  // Last so the values above keep their numbers. In the lifecycle it sits
+  // between WifiConnected and TransportsConnecting.
+  NetworkReady,
 };
 
 struct Config {
@@ -112,13 +115,25 @@ public:
   // transports, fires onDisconnected, transitions to State::Reconnecting.
   // The state-machine handler then checks WiFi: if down, also disconnects
   // and re-runs the WiFi connect step before retrying transports; if WiFi
-  // is fine, retries transports directly. onTransportsWillConnect re-fires
-  // on the way back through TransportsConnecting.
+  // is fine, retries transports directly. onNetworkReady and
+  // onTransportsWillConnect re-fire on the way back through NetworkReady.
   //
   // Use for re-registration flows, manual "kick the connection" triggers,
   // or recovering from application-level state errors that warrant a
   // fresh connect cycle.
   void reconnect();
+
+  // Tear down all transports, fire onDisconnected and transition to
+  // State::NetworkReady, keeping WiFi and the clock as they are. The
+  // onNetworkReady hook runs on the next loop(); when it returns, the
+  // machine continues through onTransportsWillConnect and
+  // TransportsConnecting as on boot.
+  //
+  // Valid from Connected and TransportsConnecting. Returns false and does
+  // nothing from any other state. Called mid-handshake (from
+  // TransportsConnecting), the teardown can block until a transport's stop
+  // call returns, up to its network timeout.
+  bool enterNetworkReady();
 
   // --- Event callbacks (single-slot, last registration wins) ---
   void onMessage(MessageCallback cb);
@@ -128,6 +143,16 @@ public:
   void onError(ErrorCallback cb);
 
   // --- Lifecycle hooks (single-slot, last registration wins) ---
+
+  // Runs in State::NetworkReady: WiFi is up and time sync has been
+  // attempted (so TLS can validate certificates), and no persistent
+  // transport is running. For work that needs the network but not the
+  // transports, such as a large HTTPS download that cannot share RAM with
+  // a second TLS session. Blocking: the machine stays in NetworkReady
+  // while the hook runs and continues to onTransportsWillConnect when it
+  // returns. Fires on every entry, including each reconnect cycle; a hook
+  // with nothing to do should return immediately.
+  void onNetworkReady(Callback cb);
   void onTransportsWillConnect(Callback cb);
   void onTransportsDidConnect(Callback cb);
 
@@ -171,6 +196,7 @@ private:
   void handleWifiConnectingState();
   void handleWifiConfiguringState();
   void handleWifiConnectedState();
+  void handleNetworkReadyState();
   void handleTransportsConnectingState();
   void handleConnectedState();
   void handleReconnectingState();
@@ -178,6 +204,7 @@ private:
 
   // WiFi helpers
   void setupWiFi();
+  void restartWifiConnect();
   void preferStrongestAccessPoint();
   void launchWiFiConfigPortal();
   static void staticWifiFailedCallback(WiFiManager* wm);
@@ -214,6 +241,7 @@ private:
   ErrorCallback _errorCallback;
 
   // Lifecycle hooks (single-slot)
+  Callback _networkReadyHook;
   Callback _willConnectHook;
   Callback _didConnectHook;
 
@@ -244,6 +272,7 @@ private:
   void fireDisconnectedCallbacks();
   void fireConnectionChangeCallbacks();
   void fireErrorCallbacks(const char* category, const char* message);
+  void fireNetworkReadyHooks();
   void fireWillConnectHooks();
   void fireDidConnectHooks();
 
