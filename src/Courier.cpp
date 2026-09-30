@@ -135,6 +135,20 @@ void Client::loop()
     handleConnectionFailedState();
     break;
   }
+
+  reportRxDrops();
+}
+
+void Client::reportRxDrops()
+{
+  for (int i = 0; i < _transportCount; i++) {
+    if (!_transports[i].transport) continue;
+    uint32_t n = _transports[i].transport->takeRxDrops();
+    if (n == 0) continue;
+    Serial.printf("[courier] %s: %u incoming message(s) dropped (out of memory or queue full)\n",
+                  _transports[i].name, (unsigned)n);
+    fireErrorCallbacks("RX", "incoming message dropped");
+  }
 }
 
 // --- State handlers ---
@@ -596,6 +610,10 @@ void Client::dispatchJSON(const char* transportName, const char* payload, size_t
     // Not JSON — drop. Per-transport hooks still saw the raw bytes.
     Serial.printf("[courier] %s: dropping non-JSON payload (%u bytes): %s\n",
                   transportName, (unsigned)length, err.c_str());
+    // Non-JSON text is legitimate on a raw-hook transport; running out of
+    // memory never is, and the sender has no other way to learn of it.
+    if (err == DeserializationError::NoMemory)
+      fireErrorCallbacks("RX", "incoming message dropped: out of memory");
     return;
   }
   // Each value's unescape stays within its own quotes, so the keys (which

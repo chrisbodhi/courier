@@ -280,6 +280,23 @@ void test_multiple_large_string_fields() {
     TEST_ASSERT_EQUAL_STRING(b.c_str(), gotB.c_str());
 }
 
+// Messages the transport had to drop (here: rx queue overflow) surface
+// through onError, not only as a log line inside the transport.
+void test_rx_drops_reported_through_on_error() {
+    std::vector<std::string> errors;
+    courier->onError([&](const char* category, const char* message) {
+        errors.push_back(std::string(category) + ":" + message);
+    });
+    advanceToConnected();
+    auto* mock = MockWebSocketClient::lastInstance();
+    for (int i = 0; i < 10; i++) mock->simulateTextMessage("{\"type\":\"burst\"}");  // queue depth 8
+    courier->loop();
+    TEST_ASSERT_EQUAL(1, errors.size());
+    TEST_ASSERT_EQUAL_STRING("RX:incoming message dropped", errors[0].c_str());
+    courier->loop();  // counter was consumed: no repeat report
+    TEST_ASSERT_EQUAL(1, errors.size());
+}
+
 void test_suspend_resume() {
     advanceToConnected();
 
@@ -903,6 +920,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_short_string_fields_are_copied);
     RUN_TEST(test_large_string_with_invalid_escape_is_dropped);
     RUN_TEST(test_multiple_large_string_fields);
+    RUN_TEST(test_rx_drops_reported_through_on_error);
     RUN_TEST(test_suspend_resume);
     RUN_TEST(test_on_error_callback_registered);
     RUN_TEST(test_connection_change_fires_on_setup);

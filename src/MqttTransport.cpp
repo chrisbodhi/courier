@@ -520,7 +520,10 @@ void MqttTransport::mqttEventHandler(void* handler_arg,
 #else
             self->_reassemblyBuf = (char*)malloc(event->total_data_len + 1);
 #endif
-            if (!self->_reassemblyBuf) break;
+            if (!self->_reassemblyBuf) {
+                self->countRxDrop();
+                break;
+            }
             self->_reassemblyLen = event->total_data_len;
             self->_reassemblyPos = 0;
             // Capture the topic for use when reassembly completes.
@@ -544,8 +547,9 @@ void MqttTransport::mqttEventHandler(void* handler_arg,
                                                self->_reassemblyLen);
                 self->freeReassemblyBuf();
             }
-        } else {
+        } else if (self->_reassemblyBuf) {
             ESP_LOGW(TAG, "MQTT reassembly overflow, dropping message");
+            self->countRxDrop();
             self->freeReassemblyBuf();
         }
         break;

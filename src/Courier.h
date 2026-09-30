@@ -193,6 +193,7 @@ private:
   static constexpr size_t IN_PLACE_MAX_STRINGS = 4;
   void dispatchJSON(const char* transportName, const char* payload, size_t length);
   void handleTransportConnection(Transport* transport, bool connected);
+  void reportRxDrops();
 
   // Health monitoring
   struct HealthState {
