@@ -149,6 +149,7 @@ private:
     const char* name = nullptr;
     std::unique_ptr<Transport> transport;
     bool failed = false;
+    bool droppedWhileConnected = false;  // see handleTransportConnection
   };
   TransportEntry _transports[MAX_TRANSPORTS];
   int _transportCount = 0;

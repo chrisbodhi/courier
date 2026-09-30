@@ -558,6 +558,30 @@ void test_server_close_reconnects_and_refires_on_connected() {
     TEST_ASSERT_EQUAL(2, connected);
 }
 
+// The IDF client reconnects underneath on its own after a drop; Client never
+// leaves Connected. onConnected must still fire for the new session (it is
+// where a layer above re-announces itself) — exactly once, and not on the
+// initial connect, whose "connected" signal drains after the transition.
+void test_transport_level_reconnect_refires_on_connected() {
+    int connected = 0;
+    courier->onConnected([&]() { connected++; });
+    advanceToConnected();
+    courier->loop();  // drain anything left from the initial connect
+    TEST_ASSERT_EQUAL(1, connected);
+
+    auto* mock = MockWebSocketClient::lastInstance();
+    mock->simulateDisconnect();
+    courier->loop();
+    TEST_ASSERT_TRUE(courier->getState() == State::Connected);  // self-heal window
+    TEST_ASSERT_EQUAL(1, connected);
+
+    mock->simulateConnect();
+    courier->loop();
+    TEST_ASSERT_EQUAL(2, connected);
+    courier->loop();
+    TEST_ASSERT_EQUAL(2, connected);
+}
+
 void test_dns_flush_on_transports_connecting_entry() {
     int before = dnsFlushCountForTests;
     courier->setup();
@@ -938,6 +962,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_setEndpoint_copies_string_inputs);
     RUN_TEST(test_reconnect_transitions_through_reconnecting);
     RUN_TEST(test_server_close_reconnects_and_refires_on_connected);
+    RUN_TEST(test_transport_level_reconnect_refires_on_connected);
     RUN_TEST(test_dns_flush_on_transports_connecting_entry);
     RUN_TEST(test_https_only_no_auto_ws_and_send_routes);
     RUN_TEST(test_https_reply_reaches_client_onmessage);

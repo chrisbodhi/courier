@@ -629,12 +629,26 @@ void Client::dispatchJSON(const char* transportName, const char* payload, size_t
 
 void Client::handleTransportConnection(Transport* transport, bool connected)
 {
+  TransportEntry* entry = nullptr;
+  for (int i = 0; i < _transportCount; i++) {
+    if (_transports[i].transport.get() == transport) entry = &_transports[i];
+  }
   if (connected) {
     Serial.printf("[courier] %s connected\n", transport->name());
     _reconnect.attempts = 0;
     _reconnect.currentInterval = MIN_RECONNECT_INTERVAL;
+    // Back after a drop the Client never left Connected for — the IDF
+    // client's own auto-reconnect. The full reconnect path fires
+    // onConnected; this one did not, so anything announced on connect
+    // (a hello, a subscription) silently never re-ran on the new session.
+    if (entry && entry->droppedWhileConnected) {
+      entry->droppedWhileConnected = false;
+      if (_state == State::Connected) fireConnectedCallbacks();
+    }
   } else {
     Serial.printf("[courier] %s disconnected\n", transport->name());
+    if (entry && _state == State::Connected && transport->isPersistent())
+      entry->droppedWhileConnected = true;
   }
 }
 
@@ -897,6 +911,8 @@ void Client::clearTransportFailureFlags()
 {
   for (int i = 0; i < _transportCount; i++) {
     _transports[i].failed = false;
+    // A fresh connect cycle fires onConnected itself.
+    _transports[i].droppedWhileConnected = false;
   }
 }
 

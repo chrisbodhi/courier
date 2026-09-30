@@ -199,7 +199,7 @@ Text payloads that do not parse as JSON are silently dropped at the Client layer
 All single-slot — last registration wins.
 
 ```cpp
-courier.onConnected([]() { /* all transports up */ });
+courier.onConnected([]() { /* connected — and again after a transport reconnects on its own */ });
 courier.onDisconnected([]() { /* one or more transports down */ });
 courier.onConnectionChange([](Courier::State state) { /* every transition */ });
 courier.onError([](const char* category, const char* msg) { /* any failure */ });
@@ -327,6 +327,8 @@ Booting -> WifiConnecting -> WifiConnected -> TransportsConnecting -> Connected
 ```
 
 `onConnectionChange` fires on every transition. `onError` fires alongside transitions caused by failures, with a category string (`"WIFI"`, `"TRANSPORT"`, `"TIME_SYNC"`, etc.) and a reason. Category `"RX"` reports an incoming message that was dropped before dispatch — out of memory (receive buffer or JSON document) or a full receive queue — so the sender can be told to retry.
+
+`onConnected` fires on entering `Connected`, and again when a persistent transport comes back after dropping while the Client stayed `Connected` (the ESP-IDF WebSocket/MQTT clients reconnect underneath on their own). Put per-session setup — a hello, a subscription — there; it re-runs for every new session.
 
 A clean close from the server (a WebSocket close frame) ends the ESP-IDF client for good — it does not auto-reconnect — so `WebSocketTransport` reports failure at once and the Client runs its full reconnect path, without waiting out the 60 s self-heal window.
 
