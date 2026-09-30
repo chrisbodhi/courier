@@ -88,6 +88,12 @@ public:
     // Used for JSON dispatch via Client::onMessage(type, doc).
     void setClientHook(MessageCallback cb) { _clientHook = cb; }
 
+    // Incoming messages dropped since the last call (allocation failure,
+    // queue overflow). Counted from whichever task receives; Client reads it
+    // each loop() and reports through onError, so a lost message is visible
+    // above the transport rather than only in a (often compiled-out) log.
+    uint32_t takeRxDrops() { return _rxDrops.exchange(0, std::memory_order_acq_rel); }
+
 protected:
     // Endpoint storage. Seeded by Client::addTransport<T> from Config; user
     // can override via setEndpoint() before begin() is called.
@@ -113,12 +119,16 @@ protected:
     std::atomic<bool> _connChangePending{false};
     std::atomic<bool> _connChangeState{false};
     std::atomic<bool> _failurePending{false};
+    std::atomic<uint32_t> _rxDrops{0};
+
+    void countRxDrop() { _rxDrops.fetch_add(1, std::memory_order_relaxed); }
 
     void queueIncomingMessage(const char* payload, size_t len) {
         char* buf = (char*)malloc(len + 1);
         if (!buf) {
             COURIER_TRANSPORT_LOGW("rx alloc failed (%u bytes), message dropped",
                                    (unsigned)len);
+            countRxDrop();
             return;
         }
         memcpy(buf, payload, len);
@@ -133,6 +143,7 @@ protected:
         if (!_pending.push(PendingMessage{buf, len, false})) {
             COURIER_TRANSPORT_LOGW("rx queue full, message dropped (%u bytes)",
                                    (unsigned)len);
+            countRxDrop();
             free(buf);
         }
     }
@@ -142,6 +153,7 @@ protected:
         if (!buf) {
             COURIER_TRANSPORT_LOGW("rx alloc failed (%u bytes), binary dropped",
                                    (unsigned)len);
+            countRxDrop();
             return;
         }
         memcpy(buf, data, len);
@@ -152,6 +164,7 @@ protected:
         if (!_pending.push(PendingMessage{buf, len, true})) {
             COURIER_TRANSPORT_LOGW("rx queue full, binary dropped (%u bytes)",
                                    (unsigned)len);
+            countRxDrop();
             free(buf);
         }
     }

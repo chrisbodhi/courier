@@ -300,6 +300,7 @@ void WebSocketTransport::wsEventHandler(void* handler_arg,
             if (!self->_reassemblyBuf) {
                 ESP_LOGW(TAG, "reassembly alloc failed (%d bytes), frame dropped",
                          data->payload_len + 1);
+                self->countRxDrop();
                 break;
             }
             self->_reassemblyLen = data->payload_len;
@@ -328,10 +329,13 @@ void WebSocketTransport::wsEventHandler(void* handler_arg,
                     self->queueIncomingMessageOwned(buf, len);
                 }
             }
-        } else {
+        } else if (self->_reassemblyBuf) {
             ESP_LOGW(TAG, "WS reassembly overflow, dropping frame");
+            self->countRxDrop();
             self->freeReassemblyBuf();
         }
+        // else: continuation of a frame whose first-chunk alloc failed —
+        // already counted, skip the rest of it.
         break;
     }
 

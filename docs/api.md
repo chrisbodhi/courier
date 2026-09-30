@@ -344,7 +344,7 @@ Booting -> WifiConnecting -> WifiConnected -> NetworkReady -> TransportsConnecti
 
 `NetworkReady` is where WiFi is up and time sync has been attempted, so TLS can validate certificates, but no persistent transport is running. `onNetworkReady` runs there, blocking, on every entry — boot, each reconnect cycle that finds WiFi up, and `enterNetworkReady()`. A hook with nothing to do should return immediately. If WiFi is down when `NetworkReady` is entered, or drops while the hook runs, the machine goes back to `WifiConnecting` (re-attempting time sync) instead of starting transports; `onDisconnected` does not fire again.
 
-`onConnectionChange` fires on every transition. `onError` fires alongside transitions caused by failures, with a category string (`"WIFI"`, `"TRANSPORT"`, `"TIME_SYNC"`, etc.) and a reason.
+`onConnectionChange` fires on every transition. `onError` fires alongside transitions caused by failures, with a category string (`"WIFI"`, `"TRANSPORT"`, `"TIME_SYNC"`, etc.) and a reason. Category `"RX"` reports an incoming message that was dropped before dispatch — out of memory (receive buffer or JSON document) or a full receive queue — so the sender can be told to retry.
 
 A clean close from the server (a WebSocket close frame) ends the ESP-IDF client for good — it does not auto-reconnect — so `WebSocketTransport` reports failure at once and the Client runs its full reconnect path, without waiting out the 60 s self-heal window.
 
