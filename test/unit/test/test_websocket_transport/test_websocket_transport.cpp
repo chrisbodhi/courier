@@ -68,6 +68,26 @@ void test_begin_creates_client_with_wss_uri() {
     TEST_ASSERT_EQUAL_STRING("wss://example.com:443/ws/abc123", client->uri.c_str());
 }
 
+void test_tls_off_builds_ws_uri_without_certs() {
+    WebSocketTransport::Config cfg;
+    cfg.tls = false;
+    cfg.cert_pem = "PEM";  // ignored without TLS
+    WebSocketTransport plain(cfg);
+    plain.begin("host", 8788, "/devices/abc");
+    auto* client = MockWebSocketClient::lastInstance();
+    TEST_ASSERT_EQUAL_STRING("ws://host:8788/devices/abc", client->uri.c_str());
+    TEST_ASSERT_TRUE(client->cert_pem.empty());
+    TEST_ASSERT_NULL((void*)client->crt_bundle_attach);
+}
+
+void test_set_tls_false_applies_on_next_begin() {
+    ws->begin("host", 443, "/p");
+    TEST_ASSERT_EQUAL_STRING("wss://host:443/p", MockWebSocketClient::lastInstance()->uri.c_str());
+    ws->setTls(false);
+    ws->begin("host", 8788, "/p");
+    TEST_ASSERT_EQUAL_STRING("ws://host:8788/p", MockWebSocketClient::lastInstance()->uri.c_str());
+}
+
 void test_begin_sets_config_defaults() {
     ws->begin("host", 443, "/path");
     auto* client = MockWebSocketClient::lastInstance();
@@ -378,6 +398,8 @@ int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_name_is_ws);
     RUN_TEST(test_begin_creates_client_with_wss_uri);
+    RUN_TEST(test_tls_off_builds_ws_uri_without_certs);
+    RUN_TEST(test_set_tls_false_applies_on_next_begin);
     RUN_TEST(test_begin_sets_config_defaults);
     RUN_TEST(test_begin_starts_client);
     RUN_TEST(test_connected_after_connect_event);

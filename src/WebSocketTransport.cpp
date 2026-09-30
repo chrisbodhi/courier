@@ -65,7 +65,8 @@ static const char* GTS_ROOT_R4_PEM =
 WebSocketTransport::WebSocketTransport(const Config& config)
     : _certPem(config.cert_pem),
       _useCertBundle(config.use_cert_bundle),
-      _useDefaultCerts(config.use_default_certs)
+      _useDefaultCerts(config.use_default_certs),
+      _tls(config.tls)
 {
 }
 
@@ -113,8 +114,8 @@ void WebSocketTransport::begin()
     // Tear down previous client if reconnecting
     destroyClient();
 
-    // Build wss:// URI
-    std::string uri = "wss://";
+    // Build the URI: wss:// unless TLS was turned off.
+    std::string uri = _tls ? "wss://" : "ws://";
     uri += _host.c_str();
     uri += ":";
     uri += std::to_string(_port);
@@ -124,7 +125,9 @@ void WebSocketTransport::begin()
 
     esp_websocket_client_config_t config = {};
     config.uri = uri.c_str();
-    if (_certPem) {
+    if (!_tls) {
+        // Plain ws://: no certificate to verify.
+    } else if (_certPem) {
         config.cert_pem = _certPem;
     } else if (_useCertBundle && tryAttachCertBundle(config, 0)) {
         // IDF certificate bundle attached (esp_crt_bundle_attach).
