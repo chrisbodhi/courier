@@ -1,6 +1,7 @@
 #include "Courier.h"
 #include "HttpTransport.h"
 #include "NetUtil.h"
+#include "JsonInPlace.h"
 #include <WiFi.h>
 #include <ezTime.h>
 #ifdef ESP_PLATFORM
@@ -564,14 +565,45 @@ void Client::dispatchJSON(const char* transportName, const char* payload, size_t
   JsonDocument doc;
   // The payload is a heap-owned scratch buffer freed right after this returns
   // (see Transport::drainPending contract), and the raw per-transport hook has
-  // already run. Parsing it as mutable char* puts ArduinoJson in zero-copy
-  // mode — strings in `doc` point into the buffer instead of being duplicated,
-  // halving the peak footprint of large payloads (matters on no-PSRAM boards).
-  if (auto err = deserializeJson(doc, const_cast<char*>(payload), length)) {
+  // already run, so it may be rewritten in place. ArduinoJson 7 has no
+  // zero-copy mode — it copies every string, growing it by doubling — so a
+  // large top-level string value (a pushed app's source) would need one
+  // contiguous block of up to twice its size mid-parse. Those values are
+  // skipped by the parse, unescaped in place and linked instead (see
+  // JsonInPlace.h), so the document must not outlive this call.
+  char* buf = const_cast<char*>(payload);
+  detail::InPlaceString big[IN_PLACE_MAX_STRINGS];
+  size_t nBig = detail::findLargeTopLevelStrings(buf, length, IN_PLACE_MIN_LEN,
+                                                 big, IN_PLACE_MAX_STRINGS);
+  // Validate before filtering: a value whose escapes don't decode is parsed
+  // the ordinary way, and ArduinoJson reports it.
+  size_t nKeep = 0;
+  for (size_t i = 0; i < nBig; i++) {
+    if (detail::unescapeJsonStringInPlace(big[i].value, big[i].rawLen, false) != SIZE_MAX)
+      big[nKeep++] = big[i];
+  }
+  DeserializationError err;
+  if (nKeep > 0) {
+    JsonDocument filter;
+    filter["*"] = true;
+    for (size_t i = 0; i < nKeep; i++)
+      filter[JsonString(big[i].key, big[i].keyLen)] = false;
+    err = deserializeJson(doc, buf, length, DeserializationOption::Filter(filter));
+  } else {
+    err = deserializeJson(doc, buf, length);
+  }
+  if (err) {
     // Not JSON — drop. Per-transport hooks still saw the raw bytes.
     Serial.printf("[courier] %s: dropping non-JSON payload (%u bytes): %s\n",
                   transportName, (unsigned)length, err.c_str());
     return;
+  }
+  // Each value's unescape stays within its own quotes, so the keys (which
+  // precede them) are still intact when they are looked up here.
+  for (size_t i = 0; i < nKeep; i++) {
+    size_t n = detail::unescapeJsonStringInPlace(big[i].value, big[i].rawLen, true);
+    doc[JsonString(big[i].key, big[i].keyLen)] =
+        JsonString(big[i].value, n, /*isStatic=*/true);
   }
   const char* mtype = doc["type"] | "";
   _messageCallback(transportName, mtype, doc);

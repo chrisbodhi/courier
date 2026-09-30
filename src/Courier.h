@@ -187,6 +187,10 @@ private:
   bool _timeSyncAttempted = false;
 
   // JSON dispatch — wired via Transport::setClientHook in attachTransport.
+  // Top-level string values at least this long (escaped) are linked in place
+  // rather than copied into the document — see dispatchJSON.
+  static constexpr size_t IN_PLACE_MIN_LEN = 256;
+  static constexpr size_t IN_PLACE_MAX_STRINGS = 4;
   void dispatchJSON(const char* transportName, const char* payload, size_t length);
   void handleTransportConnection(Transport* transport, bool connected);
 

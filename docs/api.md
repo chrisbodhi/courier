@@ -328,6 +328,10 @@ Booting -> WifiConnecting -> WifiConnected -> TransportsConnecting -> Connected
 
 `onConnectionChange` fires on every transition. `onError` fires alongside transitions caused by failures, with a category string (`"WIFI"`, `"TRANSPORT"`, `"TIME_SYNC"`, etc.) and a reason.
 
+### Large string values
+
+`onMessage` hands you a `JsonDocument` whose large top-level string values (≥ 256 bytes escaped — a pushed script, a blob) point into the receive buffer instead of being copied: ArduinoJson 7 copies every string and grows it by doubling, so a 4.6 KB value would otherwise need one contiguous 8 KB block mid-parse. The document is valid only for the duration of the callback; copy anything you keep.
+
 ## `Courier::WebSocketTransport`
 
 Wraps `esp_websocket_client`. Always implicitly available via `<Courier.h>`.

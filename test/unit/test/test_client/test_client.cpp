@@ -192,6 +192,94 @@ void test_onMessage_only_fires_for_json() {
     TEST_ASSERT_EQUAL(1, jsonCount);
 }
 
+// Large top-level string values (a pushed app's source) are unescaped in
+// place in the receive buffer and linked, not copied into the document —
+// ArduinoJson 7 would otherwise need a contiguous block of up to twice their
+// size mid-parse.
+void test_large_string_field_linked_not_copied() {
+    std::string code;
+    for (int i = 0; i < 40; i++) code += "print(\"line\")\\n-- \\u00b7 \\ud83d\\ude00\\n";
+    std::string expected;
+    for (int i = 0; i < 40; i++) expected += "print(\"line\")\n-- \xC2\xB7 \xF0\x9F\x98\x80\n";
+    // The raw frame escapes the quotes inside code.
+    std::string escapedCode;
+    for (char c : code) { if (c == '"') escapedCode += "\\\""; else escapedCode += c; }
+    std::string frame = "{\"channel\":\"system\",\"type\":\"app\",\"code\":\"" + escapedCode +
+                        "\",\"meta\":{\"n\":7,\"s\":\"}{\"},\"generationId\":\"g1\"}";
+
+    std::string gotType, gotCode, gotGen, gotMetaS;
+    bool codeStatic = false;
+    int gotMetaN = 0, calls = 0;
+    courier->setDefaultTransport("ws");
+    courier->onMessage([&](const char*, const char* type, JsonDocument& doc) {
+        calls++;
+        gotType = type;
+        JsonString c = doc["code"].as<JsonString>();
+        gotCode = std::string(c.c_str(), c.size());
+        codeStatic = c.isStatic();
+        gotGen = doc["generationId"] | "";
+        gotMetaN = doc["meta"]["n"] | 0;
+        gotMetaS = doc["meta"]["s"] | "";
+    });
+    advanceToConnected();
+    MockWebSocketClient::lastInstance()->simulateTextMessage(frame.c_str());
+    courier->loop();
+
+    TEST_ASSERT_EQUAL(1, calls);
+    TEST_ASSERT_EQUAL_STRING("app", gotType.c_str());
+    TEST_ASSERT_TRUE(codeStatic);  // linked into the receive buffer
+    TEST_ASSERT_EQUAL(expected.size(), gotCode.size());
+    TEST_ASSERT_EQUAL_STRING(expected.c_str(), gotCode.c_str());
+    TEST_ASSERT_EQUAL_STRING("g1", gotGen.c_str());
+    TEST_ASSERT_EQUAL(7, gotMetaN);
+    TEST_ASSERT_EQUAL_STRING("}{", gotMetaS.c_str());
+}
+
+// Short strings keep the ordinary (copying) path.
+void test_short_string_fields_are_copied() {
+    bool typeStatic = true;
+    courier->setDefaultTransport("ws");
+    courier->onMessage([&](const char*, const char*, JsonDocument& doc) {
+        typeStatic = doc["type"].as<JsonString>().isStatic();
+    });
+    advanceToConnected();
+    MockWebSocketClient::lastInstance()->simulateTextMessage("{\"type\":\"short\"}");
+    courier->loop();
+    TEST_ASSERT_FALSE(typeStatic);
+}
+
+// A large value whose escapes don't decode is left to ArduinoJson, which
+// rejects the message — the buffer is not rewritten before validation.
+void test_large_string_with_invalid_escape_is_dropped() {
+    std::string frame = "{\"type\":\"app\",\"code\":\"" + std::string(300, 'x') + "\\q\"}";
+    int calls = 0;
+    courier->setDefaultTransport("ws");
+    courier->onMessage([&](const char*, const char*, JsonDocument&) { calls++; });
+    advanceToConnected();
+    MockWebSocketClient::lastInstance()->simulateTextMessage(frame.c_str());
+    courier->loop();
+    TEST_ASSERT_EQUAL(0, calls);
+}
+
+// Several large values in one message are all delivered intact.
+void test_multiple_large_string_fields() {
+    std::string a(400, 'a'), b(300, 'b');
+    std::string frame = "{\"a\":\"" + a + "\",\"type\":\"shader\",\"b\":\"" + b + "\"}";
+    std::string gotA, gotB, gotType;
+    courier->setDefaultTransport("ws");
+    courier->onMessage([&](const char*, const char* type, JsonDocument& doc) {
+        gotType = type;
+        gotA = doc["a"] | "";
+        gotB = doc["b"] | "";
+    });
+    advanceToConnected();
+    MockWebSocketClient::lastInstance()->simulateTextMessage(frame.c_str());
+    courier->loop();
+    TEST_ASSERT_EQUAL_STRING("shader", gotType.c_str());
+    TEST_ASSERT_EQUAL_STRING(a.c_str(), gotA.c_str());
+    TEST_ASSERT_EQUAL_STRING(b.c_str(), gotB.c_str());
+}
+
 void test_suspend_resume() {
     advanceToConnected();
 
@@ -782,6 +870,10 @@ int main(int argc, char** argv) {
     RUN_TEST(test_on_message_callback);
     RUN_TEST(test_on_message_single_slot);
     RUN_TEST(test_onMessage_only_fires_for_json);
+    RUN_TEST(test_large_string_field_linked_not_copied);
+    RUN_TEST(test_short_string_fields_are_copied);
+    RUN_TEST(test_large_string_with_invalid_escape_is_dropped);
+    RUN_TEST(test_multiple_large_string_fields);
     RUN_TEST(test_suspend_resume);
     RUN_TEST(test_on_error_callback_registered);
     RUN_TEST(test_connection_change_fires_on_setup);
