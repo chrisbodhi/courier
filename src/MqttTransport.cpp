@@ -36,6 +36,7 @@ MqttTransport::MqttTransport()
 MqttTransport::MqttTransport(const Config& config)
     : _certPem(config.cert_pem),
       _useCertBundle(config.use_cert_bundle),
+      _tls(config.tls),
       _taskStack(config.task_stack),
       _outBufferSize(config.out_buffer_size),
       _networkTimeoutMs(config.network_timeout_ms)
@@ -276,8 +277,8 @@ void MqttTransport::begin()
     // Tear down previous client cleanly
     destroyClientLocked();
 
-    // Build wss:// URI
-    std::string uri = "wss://";
+    // Build the URI: wss:// unless TLS was turned off.
+    std::string uri = _tls ? "wss://" : "ws://";
     uri += _host.c_str();
     uri += ":";
     uri += std::to_string(_port);
@@ -292,7 +293,9 @@ void MqttTransport::begin()
     // is separately tunable via Config::out_buffer_size.
 #if defined(MQTT_CONFIG_V5) && MQTT_CONFIG_V5
     config.broker.address.uri = uri.c_str();
-    if (_certPem) {
+    if (!_tls) {
+        // Plain ws://: no certificate to verify.
+    } else if (_certPem) {
         config.broker.verification.certificate = _certPem;
     } else if (_useCertBundle) {
         config.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
@@ -303,7 +306,9 @@ void MqttTransport::begin()
     if (_networkTimeoutMs > 0)  config.network.timeout_ms = _networkTimeoutMs;
 #else
     config.uri = uri.c_str();
-    if (_certPem) {
+    if (!_tls) {
+        // Plain ws://: no certificate to verify.
+    } else if (_certPem) {
         config.cert_pem = _certPem;
     } else if (_useCertBundle) {
         config.crt_bundle_attach = esp_crt_bundle_attach;

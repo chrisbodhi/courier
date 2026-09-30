@@ -18,6 +18,10 @@ public:
         const char* cert_pem = nullptr;      // Specific CA cert in PEM format (pin)
         bool use_cert_bundle = true;         // IDF cert bundle (esp_crt_bundle_attach)
         bool use_default_certs = true;       // Embedded GTS Root R4 when bundle disabled
+        // false = plain ws:// (no TLS; the cert fields are ignored). For a
+        // trusted LAN: a TLS session costs ~25 KB of heap, which is most of
+        // what a no-PSRAM board has spare.
+        bool tls = true;
     };
 
     WebSocketTransport();
@@ -29,6 +33,9 @@ public:
     using ConfigureCallback = std::function<void(esp_websocket_client_config_t&)>;
     void onConfigure(ConfigureCallback cb);
     void useDefaultCerts();  // Use Courier's built-in root CA certs (GTS Root R4)
+    // Scheme for the next begin(): true = wss:// (default), false = ws://.
+    // For a transport the Client built for you, where Config isn't reachable.
+    void setTls(bool enabled) { _tls = enabled; }
 
     // Per-frame-type receive hooks.
     using TextCallback = std::function<void(const char* payload, size_t length)>;
@@ -61,6 +68,7 @@ private:
     const char* _certPem = nullptr;
     bool _useCertBundle = true;
     bool _useDefaultCerts = true;
+    bool _tls = true;
     ConfigureCallback _configureCallback;
 
     esp_websocket_client_handle_t _client = nullptr;

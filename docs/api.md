@@ -354,6 +354,7 @@ wsCfg.use_default_certs = true;   // fall back to the embedded GTS Root R4
 | `cert_pem` | `const char*` | `nullptr` | Pin a specific CA cert (PEM); overrides the bundle when set |
 | `use_cert_bundle` | `bool` | `true` | Validate against the IDF certificate bundle (`esp_crt_bundle_attach`) |
 | `use_default_certs` | `bool` | `true` | Fall back to Courier's embedded GTS Root R4 when the bundle is disabled |
+| `tls` | `bool` | `true` | `false` connects over plain `ws://` and ignores the cert fields. For a trusted LAN: a TLS session costs ~25 KB of heap on an ESP32. `setTls(bool)` does the same at runtime (before `begin()`) for a transport the Client built for you. `MqttTransport::Config::tls` / `setTls` mirror it |
 
 TLS precedence: `cert_pem` (pin) → `use_cert_bundle` (default) → `use_default_certs` (embedded GTS Root R4, the legacy fallback for builds without `MBEDTLS_CERTIFICATE_BUNDLE`) → nothing. `useDefaultCerts()` is the runtime equivalent of setting `use_cert_bundle = false` — it disables the bundle and selects the embedded root.
 

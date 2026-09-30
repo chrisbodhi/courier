@@ -10,6 +10,7 @@
 
 ### New
 
+- `WebSocketTransport::Config::tls` / `setTls(bool)` (and the same on `MqttTransport`): `false` connects over plain `ws://`. The scheme was hard-coded to `wss://`; the only escape was rewriting the IDF config's `uri` in `onConfigure`. On a no-PSRAM ESP32, dropping TLS frees ~25 KB of heap.
 - `onError` category `"RX"`: incoming messages were dropped — allocation failure or a full receive queue (with the count), or a message that began as JSON but failed to parse (with ArduinoJson's reason). Previously only an `ESP_LOGW`, compiled out at the default Arduino log level, or nothing at all.
 
 ## v0.8.1

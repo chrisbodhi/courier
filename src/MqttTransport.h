@@ -27,6 +27,8 @@ public:
         const char* clientId = nullptr;
         const char* cert_pem = nullptr;
         bool use_cert_bundle = true;
+        // false = MQTT over plain ws:// (no TLS; cert fields ignored).
+        bool tls = true;
         int task_stack = 8192;
         // 0 = leave the IDF default (1024). Raising the outbound buffer past
         // the largest payload you publish saves a write syscall and a TLS
@@ -55,6 +57,8 @@ public:
     // Use for custom TLS settings, timeouts, etc.
     using ConfigureCallback = std::function<void(esp_mqtt_client_config_t&)>;
     void onConfigure(ConfigureCallback cb);
+    // Scheme for the next begin(): true = wss:// (default), false = ws://.
+    void setTls(bool enabled) { _tls = enabled; }
 
     // Set the MQTT client ID (must be called before begin()).
     void setClientId(const char* clientId) { _configClientId = clientId ? clientId : ""; }
@@ -199,6 +203,7 @@ private:
 
     const char* _certPem = nullptr;
     bool _useCertBundle = true;
+    bool _tls = true;
     int _taskStack = 8192;
     int _outBufferSize = 0;
     int _networkTimeoutMs = 0;

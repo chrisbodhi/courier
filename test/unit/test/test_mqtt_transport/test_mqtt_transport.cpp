@@ -91,6 +91,18 @@ void test_begin_constructs_wss_uri() {
     TEST_ASSERT_EQUAL_STRING("wss://example.com:443/agents/broker/room456", client->uri.c_str());
 }
 
+void test_tls_off_builds_ws_uri_without_certs() {
+    MqttTransport::Config cfg;
+    cfg.tls = false;
+    cfg.cert_pem = "PEM";
+    mqtt = new MqttTransport(cfg);
+    mqtt->begin("broker.lan", 8080, "/mqtt");
+    auto* client = MockMqttClient::lastInstance();
+    TEST_ASSERT_EQUAL_STRING("ws://broker.lan:8080/mqtt", client->uri.c_str());
+    TEST_ASSERT_TRUE(client->cert_pem.empty());
+    TEST_ASSERT_NULL((void*)client->crt_bundle_attach);
+}
+
 void test_begin_sets_client_id() {
     mqtt = createWithTopics("dev123", "sensor");
     mqtt->begin("host", 443, "/path");
@@ -1282,6 +1294,7 @@ int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_name_is_mqtt);
     RUN_TEST(test_begin_constructs_wss_uri);
+    RUN_TEST(test_tls_off_builds_ws_uri_without_certs);
     RUN_TEST(test_begin_sets_client_id);
     RUN_TEST(test_begin_without_client_id_uses_empty);
     RUN_TEST(test_begin_starts_client);
