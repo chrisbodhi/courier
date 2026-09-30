@@ -217,7 +217,7 @@ courier.onError([](const char* category, const char* msg) { /* any failure */ })
 
 // Lifecycle hooks. Use these for token exchange or registration that must
 // complete before transports connect / right after they connect.
-courier.onNetworkReady([]() { /* WiFi up, clock synced, no transports */ });
+courier.onNetworkReady([]() { /* WiFi up, time sync attempted, no transports */ });
 courier.onTransportsWillConnect([]() { /* before transports start */ });
 courier.onTransportsDidConnect([]()  { /* after transports connect */ });
 ```
