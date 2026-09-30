@@ -14,6 +14,10 @@ namespace Courier {
 // Static member initialization
 Client* Client::_instance = nullptr;
 
+#ifndef ESP_PLATFORM
+ArduinoJson::Allocator* dispatchAllocatorForTests = nullptr;
+#endif
+
 Client::Client(const Config& config)
     : _config(config),
       _state(State::Booting),
@@ -579,7 +583,12 @@ void Client::dispatchJSON(const char* transportName, const char* payload, size_t
       : _config.defaultTransport;
   if (!def || !def[0] || strcmp(transportName, def) != 0) return;
 
+#ifdef ESP_PLATFORM
   JsonDocument doc;
+#else
+  JsonDocument doc(dispatchAllocatorForTests ? dispatchAllocatorForTests
+                                             : ArduinoJson::detail::DefaultAllocator::instance());
+#endif
   // The payload is a heap-owned scratch buffer freed right after this returns
   // (see Transport::drainPending contract), and the raw per-transport hook has
   // already run, so it may be rewritten in place. ArduinoJson 7 has no
@@ -633,6 +642,16 @@ void Client::dispatchJSON(const char* transportName, const char* payload, size_t
     size_t n = detail::unescapeJsonStringInPlace(big[i].value, big[i].rawLen, true);
     doc[JsonString(big[i].key, big[i].keyLen)] =
         JsonString(big[i].value, n, /*isStatic=*/true);
+  }
+  // Linking adds a member and copies its key. Under memory pressure that can
+  // fail, and ArduinoJson fails silently: the message would be delivered
+  // without its largest field (a push arriving with no code). Drop it as out
+  // of memory instead, like a failed parse.
+  if (doc.overflowed()) {
+    Serial.printf("[courier] %s: dropping payload (%u bytes): NoMemory\n",
+                  transportName, (unsigned)length);
+    fireErrorCallbacks("RX", "incoming message dropped: NoMemory");
+    return;
   }
   const char* mtype = doc["type"] | "";
   _messageCallback(transportName, mtype, doc);

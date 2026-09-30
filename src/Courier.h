@@ -45,6 +45,12 @@ struct Config {
         defaultTransport(defaultTransport), dns1(dns1), dns2(dns2) {}
 };
 
+#ifndef ESP_PLATFORM
+// Native tests only: the allocator Client::dispatchJSON's document uses
+// (nullptr = ArduinoJson's default), so tests can make allocations fail.
+extern ArduinoJson::Allocator* dispatchAllocatorForTests;
+#endif
+
 // NOTE: Only one Client instance is supported per process. WiFiManager
 // requires a C-style function pointer callback, which necessitates a
 // static instance pointer. Creating multiple Client instances will
