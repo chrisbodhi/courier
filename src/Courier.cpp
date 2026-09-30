@@ -236,10 +236,23 @@ void Client::handleWifiConnectedState()
 
 void Client::handleNetworkReadyState()
 {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[courier] WiFi down in NetworkReady - resetting to WiFi connection state");
+    restartWifiConnect();
+    return;
+  }
+
   fireNetworkReadyHooks();
 
   // The hook may have moved the machine on (e.g. by calling reconnect()).
   if (_state != State::NetworkReady) return;
+
+  // WiFi may have dropped while the hook blocked.
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[courier] WiFi lost during onNetworkReady - resetting to WiFi connection state");
+    restartWifiConnect();
+    return;
+  }
 
   // Fire onTransportsWillConnect hooks (e.g. registration)
   fireWillConnectHooks();
@@ -293,7 +306,13 @@ void Client::handleTransportsConnectingState()
     // Fire onTransportsDidConnect hooks
     fireDidConnectHooks();
 
+    // The hook may have moved the machine on (e.g. by calling enterNetworkReady()).
+    if (_state != State::TransportsConnecting) return;
+
     transitionTo(State::Connected);
+
+    // An onConnectionChange callback may have moved the machine on.
+    if (_state != State::Connected) return;
 
     // Fire connected callbacks
     fireConnectedCallbacks();
@@ -393,11 +412,7 @@ void Client::handleReconnectingState()
   if (WiFi.status() != WL_CONNECTED)
   {
     Serial.println("[courier] WiFi lost - resetting to WiFi connection state");
-    WiFi.disconnect();
-    transitionTo(State::WifiConnecting);
-    _timeSyncAttempted = false;
-    _reconnect.attempts = 0;
-    _reconnect.currentInterval = MIN_RECONNECT_INTERVAL;
+    restartWifiConnect();
     return;
   }
 
@@ -419,6 +434,18 @@ void Client::handleConnectionFailedState()
 }
 
 // --- WiFi helpers ---
+
+// Drops the WiFi link and returns to WifiConnecting with a fresh time sync
+// and backoff. Fires no onDisconnected: callers either never had transports
+// or have already fired it.
+void Client::restartWifiConnect()
+{
+  WiFi.disconnect();
+  _timeSyncAttempted = false;
+  _reconnect.attempts = 0;
+  _reconnect.currentInterval = MIN_RECONNECT_INTERVAL;
+  transitionTo(State::WifiConnecting);
+}
 
 void Client::setupWiFi()
 {

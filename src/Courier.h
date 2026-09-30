@@ -18,12 +18,14 @@ enum class State {
   Booting,
   WifiConnecting,
   WifiConnected,
-  NetworkReady,
   WifiConfiguring,
   TransportsConnecting,
   Connected,
   Reconnecting,
   ConnectionFailed,
+  // Last so the values above keep their numbers. In the lifecycle it sits
+  // between WifiConnected and TransportsConnecting.
+  NetworkReady,
 };
 
 struct Config {
@@ -128,7 +130,9 @@ public:
   // TransportsConnecting as on boot.
   //
   // Valid from Connected and TransportsConnecting. Returns false and does
-  // nothing from any other state.
+  // nothing from any other state. Called mid-handshake (from
+  // TransportsConnecting), the teardown can block until a transport's stop
+  // call returns, up to its network timeout.
   bool enterNetworkReady();
 
   // --- Event callbacks (single-slot, last registration wins) ---
@@ -200,6 +204,7 @@ private:
 
   // WiFi helpers
   void setupWiFi();
+  void restartWifiConnect();
   void preferStrongestAccessPoint();
   void launchWiFiConfigPortal();
   static void staticWifiFailedCallback(WiFiManager* wm);

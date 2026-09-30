@@ -926,6 +926,116 @@ void test_network_ready_hook_can_redirect_the_machine() {
     TEST_ASSERT_EQUAL(0, willConnectCount);
 }
 
+void test_did_connect_hook_can_enter_network_ready() {
+    int connectedCount = 0;
+    int disconnectedCount = 0;
+    bool entered = false;
+    courier->onConnected([&]() { connectedCount++; });
+    courier->onDisconnected([&]() { disconnectedCount++; });
+    courier->onTransportsDidConnect([&]() {
+        if (entered) return;
+        entered = true;
+        TEST_ASSERT_TRUE(courier->enterNetworkReady());
+    });
+
+    advanceToConnected();  // did-connect hook runs on the last loop()
+    TEST_ASSERT_TRUE(courier->getState() == State::NetworkReady);
+    TEST_ASSERT_FALSE(courier->isConnected());
+    TEST_ASSERT_EQUAL(0, connectedCount);
+    TEST_ASSERT_EQUAL(1, disconnectedCount);
+
+    courier->loop();  // NetworkReady -> TransportsConnecting
+    courier->loop();  // begin(): a fresh WS client
+    MockWebSocketClient::lastInstance()->simulateConnect();
+    courier->loop();
+    TEST_ASSERT_TRUE(courier->getState() == State::Connected);
+    TEST_ASSERT_EQUAL(1, connectedCount);
+}
+
+void test_did_connect_hook_can_reconnect() {
+    int connectedCount = 0;
+    courier->onConnected([&]() { connectedCount++; });
+    courier->onTransportsDidConnect([&]() { courier->reconnect(); });
+
+    advanceToConnected();
+    TEST_ASSERT_TRUE(courier->getState() == State::Reconnecting);
+    TEST_ASSERT_EQUAL(0, connectedCount);
+}
+
+void test_connection_change_to_connected_can_enter_network_ready() {
+    std::vector<std::string> events;
+    bool entered = false;
+    courier->onConnected([&]() { events.push_back("connected"); });
+    courier->onDisconnected([&]() { events.push_back("disconnected"); });
+    courier->onConnectionChange([&](State s) {
+        if (s != State::Connected || entered) return;
+        entered = true;
+        TEST_ASSERT_TRUE(courier->enterNetworkReady());
+    });
+
+    advanceToConnected();
+    TEST_ASSERT_TRUE(courier->getState() == State::NetworkReady);
+    TEST_ASSERT_EQUAL(1, events.size());
+    TEST_ASSERT_EQUAL_STRING("disconnected", events[0].c_str());
+}
+
+void test_network_ready_boot_pass_with_wifi_down_rejoins_wifi() {
+    int readyCount = 0;
+    int willConnectCount = 0;
+    int disconnectedCount = 0;
+    courier->onNetworkReady([&]() { readyCount++; });
+    courier->onTransportsWillConnect([&]() { willConnectCount++; });
+    courier->onDisconnected([&]() { disconnectedCount++; });
+
+    courier->setup();
+    courier->loop();  // WifiConnecting -> WifiConnected
+    courier->loop();  // WifiConnected -> NetworkReady
+    TEST_ASSERT_TRUE(courier->getState() == State::NetworkReady);
+    TEST_ASSERT_EQUAL(1, g_mockWaitForSyncCount);
+
+    WiFi.setMockStatus(WL_DISCONNECTED);
+    courier->loop();  // WiFi down on entry: back to WifiConnecting
+    TEST_ASSERT_TRUE(courier->getState() == State::WifiConnecting);
+    TEST_ASSERT_EQUAL(0, readyCount);
+    TEST_ASSERT_EQUAL(0, willConnectCount);
+    TEST_ASSERT_EQUAL(0, disconnectedCount);  // no transports ever ran
+
+    WiFi.setMockStatus(WL_CONNECTED);
+    courier->loop();  // WifiConnecting -> WifiConnected
+    courier->loop();  // time sync re-attempted -> NetworkReady
+    TEST_ASSERT_EQUAL(2, g_mockWaitForSyncCount);
+    courier->loop();  // NetworkReady -> TransportsConnecting
+    TEST_ASSERT_TRUE(courier->getState() == State::TransportsConnecting);
+    TEST_ASSERT_EQUAL(1, readyCount);
+    TEST_ASSERT_EQUAL(1, willConnectCount);
+    TEST_ASSERT_EQUAL(0, disconnectedCount);
+}
+
+void test_network_ready_wifi_drop_during_hook_rejoins_wifi() {
+    int readyCount = 0;
+    int willConnectCount = 0;
+    int disconnectedCount = 0;
+    bool dropWifi = false;
+    courier->onNetworkReady([&]() {
+        readyCount++;
+        if (dropWifi) WiFi.setMockStatus(WL_DISCONNECTED);
+    });
+    courier->onTransportsWillConnect([&]() { willConnectCount++; });
+    courier->onDisconnected([&]() { disconnectedCount++; });
+
+    advanceToConnected();
+    TEST_ASSERT_TRUE(courier->enterNetworkReady());
+    TEST_ASSERT_EQUAL(1, disconnectedCount);
+
+    dropWifi = true;
+    courier->loop();  // hook runs, WiFi drops under it
+    TEST_ASSERT_TRUE(courier->getState() == State::WifiConnecting);
+    TEST_ASSERT_EQUAL(2, readyCount);
+    TEST_ASSERT_EQUAL(1, willConnectCount);   // not fired for the dead link
+    TEST_ASSERT_EQUAL(1, disconnectedCount);  // enterNetworkReady() already fired it
+    TEST_ASSERT_EQUAL(1, MockWebSocketClient::instanceCount());  // no begin()
+}
+
 int main(int argc, char** argv) {
     UNITY_BEGIN();
 
@@ -982,6 +1092,11 @@ int main(int argc, char** argv) {
     RUN_TEST(test_enter_network_ready_refused_outside_transport_states);
     RUN_TEST(test_reconnecting_with_wifi_up_reenters_network_ready);
     RUN_TEST(test_network_ready_hook_can_redirect_the_machine);
+    RUN_TEST(test_did_connect_hook_can_enter_network_ready);
+    RUN_TEST(test_did_connect_hook_can_reconnect);
+    RUN_TEST(test_connection_change_to_connected_can_enter_network_ready);
+    RUN_TEST(test_network_ready_boot_pass_with_wifi_down_rejoins_wifi);
+    RUN_TEST(test_network_ready_wifi_drop_during_hook_rejoins_wifi);
 
     return UNITY_END();
 }
