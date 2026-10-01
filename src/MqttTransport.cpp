@@ -539,7 +539,7 @@ void MqttTransport::mqttEventHandler(void* handler_arg,
 
             if (self->_reassemblyPos == self->_reassemblyLen) {
                 self->_reassemblyBuf[self->_reassemblyLen] = '\0';
-                // Hand both buffers to the queue rather than copying them.
+                // The queue takes ownership of both buffers.
                 self->queueIncomingMqttMessage(self->_reassemblyTopic,
                                                self->_reassemblyBuf,
                                                self->_reassemblyLen);

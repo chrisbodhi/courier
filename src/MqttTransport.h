@@ -252,8 +252,8 @@ private:
     TopicBinaryCallback _onTopicBinary;
 
     // Inbound FIFO: a message and its topic travel as one entry, so they can
-    // never be paired with anyone else's. Used in place of the base class's
-    // _pending. Both buffers are heap-owned and freed on drain.
+    // never be paired with anyone else's. The base class's _pending is unused
+    // here. Both buffers are heap-owned and freed on drain.
     struct PendingTopicMessage {
         char*  topic;
         char*  payload;  // NUL at payload[length]
