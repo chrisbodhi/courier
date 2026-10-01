@@ -60,9 +60,11 @@ MqttTransport::~MqttTransport()
 {
     destroyClient();
     freeReassemblyBuf();
-    char* topic = nullptr;
-    while (_topicQueue.pop(topic)) free(topic);
-    // Note: base class destructor drains _pending and frees its payloads.
+    PendingTopicMessage msg;
+    while (_inbox.pop(msg)) {
+        free(msg.topic);
+        free(msg.payload);
+    }
 }
 
 void MqttTransport::freeReassemblyBuf()
@@ -335,23 +337,15 @@ bool MqttTransport::isConnected() const
     return _client && _connected.load(std::memory_order_acquire);
 }
 
-void MqttTransport::queueIncomingMqttMessage(const char* topic, const char* payload,
-                                             size_t len)
+void MqttTransport::queueIncomingMqttMessage(char* topic, char* payload, size_t len)
 {
     // Queued uniformly; the text/binary lane is chosen at drain time, on the
     // task that owns _topics. The extra NUL costs one byte and is ignored by
     // binary consumers, which read `len`.
-    //
-    // Push payload first. If the topic push fails after, that one message
-    // gets _onMessage / _clientHook but no _onTopicMessage — bounded loss.
-    // Pushing topic first risks a permanent index-shift if payload then
-    // fails, which is much worse.
-    queueIncomingMessage(payload, len);  // base; silent drop on failure
-
-    char* topicCopy = strdup(topic);
-    if (!topicCopy) return;
-    if (!_topicQueue.push(topicCopy)) {
-        free(topicCopy);
+    if (!_inbox.push(PendingTopicMessage{topic, payload, len})) {
+        ESP_LOGW(TAG, "rx queue full, message dropped (%u bytes)", (unsigned)len);
+        free(topic);
+        free(payload);
     }
 }
 
@@ -386,25 +380,21 @@ const char* MqttTransport::ErrorInfo::describe() const
 
 void MqttTransport::loop()
 {
-    PendingMessage pmsg;
-    char* topic = nullptr;
-    while (_pending.pop(pmsg)) {
-        bool gotTopic = _topicQueue.pop(topic);
-        if (gotTopic && isBinaryTopic(topic)) {
+    PendingTopicMessage msg;
+    while (_inbox.pop(msg)) {
+        if (isBinaryTopic(msg.topic)) {
             // Binary never enters the JSON lane: _clientHook is not called.
             if (_onTopicBinary) {
-                _onTopicBinary(topic, (const uint8_t*)pmsg.payload, pmsg.length);
+                _onTopicBinary(msg.topic, (const uint8_t*)msg.payload, msg.length);
             }
-            if (_onBinaryMessage) _onBinaryMessage((const uint8_t*)pmsg.payload, pmsg.length);
+            if (_onBinaryMessage) _onBinaryMessage((const uint8_t*)msg.payload, msg.length);
         } else {
-            if (_onTopicMessage && gotTopic) {
-                _onTopicMessage(topic, (const char*)pmsg.payload, pmsg.length);
-            }
-            if (_onMessage) _onMessage((const char*)pmsg.payload, pmsg.length);
-            if (_clientHook) _clientHook((const char*)pmsg.payload, pmsg.length);
+            if (_onTopicMessage) _onTopicMessage(msg.topic, msg.payload, msg.length);
+            if (_onMessage) _onMessage(msg.payload, msg.length);
+            if (_clientHook) _clientHook(msg.payload, msg.length);
         }
-        if (gotTopic) free(topic);
-        free(pmsg.payload);
+        free(msg.topic);
+        free(msg.payload);
     }
 
     if (_selfHealActive) {
@@ -493,16 +483,23 @@ void MqttTransport::mqttEventHandler(void* handler_arg,
         // Single-chunk message (fits in library's 1KB buffer)
         if (event->total_data_len == event->data_len && event->current_data_offset == 0) {
             self->freeReassemblyBuf();
-            // Heap-allocate the topic to avoid silent truncation of topics
-            // longer than a fixed stack buffer. Topic is not NUL-terminated
-            // in the IDF event. queueIncomingMqttMessage strdups internally,
-            // so the local copy can be freed immediately after.
-            char* topicCopy = (char*)malloc(event->topic_len + 1);
-            if (!topicCopy) break;
-            memcpy(topicCopy, event->topic, event->topic_len);
-            topicCopy[event->topic_len] = '\0';
-            self->queueIncomingMqttMessage(topicCopy, event->data, event->data_len);
-            free(topicCopy);
+            // Neither the topic nor the data is NUL-terminated in the IDF
+            // event; both are copied onto the heap, so a topic of any length
+            // survives intact.
+            char* topic = (char*)malloc(event->topic_len + 1);
+            char* payload = (char*)malloc(event->data_len + 1);
+            if (!topic || !payload) {
+                ESP_LOGW(TAG, "rx alloc failed (%d bytes), message dropped",
+                         event->data_len);
+                free(topic);
+                free(payload);
+                break;
+            }
+            memcpy(topic, event->topic, event->topic_len);
+            topic[event->topic_len] = '\0';
+            memcpy(payload, event->data, event->data_len);
+            payload[event->data_len] = '\0';
+            self->queueIncomingMqttMessage(topic, payload, event->data_len);
             break;
         }
 
@@ -525,10 +522,13 @@ void MqttTransport::mqttEventHandler(void* handler_arg,
             self->_reassemblyPos = 0;
             // Capture the topic for use when reassembly completes.
             self->_reassemblyTopic = (char*)malloc(event->topic_len + 1);
-            if (self->_reassemblyTopic) {
-                memcpy(self->_reassemblyTopic, event->topic, event->topic_len);
-                self->_reassemblyTopic[event->topic_len] = '\0';
+            if (!self->_reassemblyTopic) {
+                ESP_LOGW(TAG, "rx alloc failed (topic), message dropped");
+                self->freeReassemblyBuf();
+                break;
             }
+            memcpy(self->_reassemblyTopic, event->topic, event->topic_len);
+            self->_reassemblyTopic[event->topic_len] = '\0';
         }
 
         if (self->_reassemblyBuf &&
@@ -539,9 +539,12 @@ void MqttTransport::mqttEventHandler(void* handler_arg,
 
             if (self->_reassemblyPos == self->_reassemblyLen) {
                 self->_reassemblyBuf[self->_reassemblyLen] = '\0';
-                const char* topic = self->_reassemblyTopic ? self->_reassemblyTopic : "";
-                self->queueIncomingMqttMessage(topic, self->_reassemblyBuf,
+                // Hand both buffers to the queue rather than copying them.
+                self->queueIncomingMqttMessage(self->_reassemblyTopic,
+                                               self->_reassemblyBuf,
                                                self->_reassemblyLen);
+                self->_reassemblyTopic = nullptr;
+                self->_reassemblyBuf = nullptr;
                 self->freeReassemblyBuf();
             }
         } else {
