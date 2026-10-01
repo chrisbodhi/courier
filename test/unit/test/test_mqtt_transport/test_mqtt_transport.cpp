@@ -562,8 +562,7 @@ void test_mqtt_on_configure_not_set_works() {
 }
 
 // Phase 8: topic-aware receive hook — onMessage(topic, payload, len) fires
-// alongside the existing payload-only callbacks, the topic travelling through
-// the FIFO in the same entry as its payload.
+// alongside the existing payload-only callbacks.
 static int onMessageCount = 0;
 static char lastTopicBuf[256] = "";
 static char lastPayloadBuf[512] = "";
@@ -592,8 +591,7 @@ void test_onMessage_receives_topic_and_payload() {
     TEST_ASSERT_EQUAL_STRING("{\"v\":42}", lastPayloadBuf);
 }
 
-// A message dropped on a full queue takes its topic with it: the messages
-// after it each arrive on their own topic.
+// Messages after one dropped on a full queue arrive on their own topics.
 static std::string topicLog;
 
 void test_dropped_message_does_not_shift_later_topics() {
@@ -623,8 +621,7 @@ void test_dropped_message_does_not_shift_later_topics() {
 }
 
 // The IDF event task queues while loop() drains on another task. Each
-// message's payload names its own topic, so any pairing slip shows up as a
-// mismatch or as a message delivered without a topic.
+// payload names its topic; the test fails on a mismatch or a missing topic.
 static std::atomic<int> pairedCount{0};
 static std::atomic<int> mismatchCount{0};
 

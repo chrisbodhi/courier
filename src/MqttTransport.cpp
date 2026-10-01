@@ -484,8 +484,7 @@ void MqttTransport::mqttEventHandler(void* handler_arg,
         if (event->total_data_len == event->data_len && event->current_data_offset == 0) {
             self->freeReassemblyBuf();
             // Neither the topic nor the data is NUL-terminated in the IDF
-            // event; both are copied onto the heap, so a topic of any length
-            // survives intact.
+            // event, so both are copied onto the heap.
             char* topic = (char*)malloc(event->topic_len + 1);
             char* payload = (char*)malloc(event->data_len + 1);
             if (!topic || !payload) {
