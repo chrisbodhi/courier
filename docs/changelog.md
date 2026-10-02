@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `MqttTransport` delivers every message on its own topic. A payload and its topic were queued separately and paired back up by position, so one dropped payload, or `loop()` draining between the two pushes, left every later message on the topic of the one before it until the transport was destroyed. They now travel as one queue entry. A message whose topic cannot be copied is dropped whole rather than delivered without a topic, and a reassembled multi-chunk message is handed to the queue without a second copy.
+
+---
+
 ## v0.9.0
 
 ### New
