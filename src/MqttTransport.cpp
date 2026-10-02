@@ -349,6 +349,7 @@ void MqttTransport::queueIncomingMqttMessage(char* topic, char* payload, size_t 
     // binary consumers, which read `len`.
     if (!_inbox.push(PendingTopicMessage{topic, payload, len})) {
         ESP_LOGW(TAG, "rx queue full, message dropped (%u bytes)", (unsigned)len);
+        countRxDrop();
         free(topic);
         free(payload);
     }
@@ -495,6 +496,7 @@ void MqttTransport::mqttEventHandler(void* handler_arg,
             if (!topic || !payload) {
                 ESP_LOGW(TAG, "rx alloc failed (%d bytes), message dropped",
                          event->data_len);
+                self->countRxDrop();
                 free(topic);
                 free(payload);
                 break;
@@ -531,6 +533,7 @@ void MqttTransport::mqttEventHandler(void* handler_arg,
             self->_reassemblyTopic = (char*)malloc(event->topic_len + 1);
             if (!self->_reassemblyTopic) {
                 ESP_LOGW(TAG, "rx alloc failed (topic), message dropped");
+                self->countRxDrop();
                 self->freeReassemblyBuf();
                 break;
             }

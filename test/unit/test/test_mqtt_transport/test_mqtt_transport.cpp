@@ -1302,6 +1302,28 @@ void test_queue_recovers_after_overflow() {
     TEST_ASSERT_TRUE(lastError.isNotAuthorized());
 }
 
+// A message dropped on a full inbox is counted for Client's onError("RX"),
+// not only logged.
+void test_inbox_overflow_counts_rx_drops() {
+    mqtt = createWithTopics("dev123", "command");
+    mqtt->begin("host", 443, "/path");
+    MockMqttClient* client = MockMqttClient::lastInstance();
+    client->simulateConnect();
+    int delivered = 0;
+    mqtt->onMessage([&delivered](const char*, const char*, size_t) { delivered++; });
+
+    const int sent = 12;
+    for (int i = 0; i < sent; i++) {
+        client->simulateMessage("devices/dev123/command", "{\"type\":\"test\"}");
+    }
+    mqtt->loop();
+
+    TEST_ASSERT_GREATER_THAN(0, delivered);
+    TEST_ASSERT_LESS_THAN(sent, delivered);
+    TEST_ASSERT_EQUAL_UINT32(sent - delivered, mqtt->takeRxDrops());
+    TEST_ASSERT_EQUAL_UINT32(0, mqtt->takeRxDrops());
+}
+
 static int reentrantDisconnectCount = 0;
 static int reentrantBeginCount = 0;
 
@@ -1436,6 +1458,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_error_reporting_does_not_disturb_message_delivery);
     RUN_TEST(test_error_queue_overflow_drops_without_corrupting_earlier_reports);
     RUN_TEST(test_queue_recovers_after_overflow);
+    RUN_TEST(test_inbox_overflow_counts_rx_drops);
     RUN_TEST(test_callback_may_call_disconnect_reentrantly);
     RUN_TEST(test_callback_may_call_begin_reentrantly);
     return UNITY_END();
