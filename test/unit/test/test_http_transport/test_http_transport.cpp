@@ -363,6 +363,39 @@ void test_all_retries_exhausted_returns_last_error() {
     TEST_ASSERT_EQUAL(3, dnsFlushCountForTests);
 }
 
+void test_fetch_429_exposes_retry_after() {
+    MockHttpClient::ScriptStep step;
+    step.status = 429;
+    step.headers = {{"retry-after", "60"}};
+    step.bodyChunks = {"{}"};
+    MockHttpClient::pushScript(step);
+
+    Response r = http->fetch("https://example.com/api");
+    TEST_ASSERT_EQUAL(429, r.status);
+    TEST_ASSERT_EQUAL_STRING("60", r.header("Retry-After"));
+    TEST_ASSERT_EQUAL(1, MockHttpClient::performCount());
+
+    Response moved(std::move(r));
+    TEST_ASSERT_EQUAL_STRING("60", moved.header("Retry-After"));
+}
+
+void test_retry_after_comes_from_the_final_hop_only() {
+    MockHttpClient::ScriptStep step;
+    MockHttpClient::Hop hop1;
+    hop1.status = 307;
+    hop1.headers = {{"Retry-After", "5"}, {"Location", "https://example.com/final"}};
+    hop1.bodyChunks = {"<html>moved</html>"};
+    step.redirectHops = {hop1};
+    step.status = 200;
+    step.headers = {{"Content-Type", "text/plain"}};
+    step.bodyChunks = {"ok"};
+    MockHttpClient::pushScript(step);
+
+    Response r = http->fetch("https://example.com/start");
+    TEST_ASSERT_EQUAL(200, r.status);
+    TEST_ASSERT_NULL(r.header("Retry-After"));
+}
+
 void test_http_error_status_never_retries() {
     MockHttpClient::ScriptStep err500;
     err500.status = 500;
@@ -709,6 +742,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_retry_on_transport_failure_then_success);
     RUN_TEST(test_all_retries_exhausted_returns_last_error);
     RUN_TEST(test_http_error_status_never_retries);
+    RUN_TEST(test_fetch_429_exposes_retry_after);
+    RUN_TEST(test_retry_after_comes_from_the_final_hop_only);
     RUN_TEST(test_retries_zero_disables);
     RUN_TEST(test_per_call_retries_override_config);
     RUN_TEST(test_timeout_classification);
