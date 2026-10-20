@@ -743,6 +743,8 @@ Transport-failure sentinels (in `namespace Courier::Http`): `ErrNoWifi` (`-1000`
 | `onBody` | `BodyCallback` | — | Streaming: `(data, len)` per chunk; return `false` to abort (OTA-download shaped) |
 | `configure` | `ConfigureCallback` | — | Per-call raw-config trapdoor (`esp_http_client_config_t&`) |
 
+Request headers have no fixed length limit. `esp_http_client` writes the request line and headers into one transmit buffer (`buffer_size_tx`, `512` bytes by default), so `fetch()` sizes it for the request it sends: the method, the URL (for the request line and `Host`), every `headers` entry and the JSON content-type, plus room for the headers `esp_http_client` adds itself. A request that fits in `512` bytes keeps the default. A long `Authorization: Bearer ...` value (a JWT, a signature) therefore works as-is. `onConfigure` and `configure` run after the sizing and can set `buffer_size_tx` themselves, for example when a redirect leads to a much longer URL than the one fetched (the buffer is allocated once per request, for the first URL).
+
 Setting `onBody` switches to streaming mode: the `Response` carries status and headers but no buffered body, and chunks arrive via the callback (abortable). Otherwise the body is buffered up to `maxResponseBytes`.
 
 ```cpp
