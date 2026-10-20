@@ -160,6 +160,7 @@ struct HttpTransport::FetchCtx {
     bool streaming = false;
     bool responseFired = false;
     bool sawBody = false;
+    bool hopFinished = false;  // ON_FINISH: the next ON_HEADER is a new hop
     bool tooLarge = false;
     bool aborted = false;
 };
@@ -171,15 +172,15 @@ esp_err_t HttpTransport::eventHandler(esp_http_client_event_t* evt)
 
     switch (evt->event_id) {
     case HTTP_EVENT_ON_HEADER:
-        if (ctx->responseFired || ctx->sawBody) {
-            // Headers arriving after we'd already latched a response for a
-            // previous hop means esp_http_client just followed a redirect
-            // (the prior hop's body — e.g. a redirect page — had data of its
-            // own). Discard that hop's accumulated body/headers so they
+        if (ctx->hopFinished) {
+            // esp_http_client_perform() ends every hop with ON_FINISH, so
+            // headers after one mean it is following a redirect. Discard the
+            // previous hop's body and headers, body or no body, so they
             // don't bleed into (or concatenate with) the new hop's response.
             ctx->resp->resetForNewHop();
             ctx->responseFired = false;
             ctx->sawBody = false;
+            ctx->hopFinished = false;
         }
         ctx->resp->captureHeader(evt->header_key, evt->header_value);
         break;
@@ -223,6 +224,10 @@ esp_err_t HttpTransport::eventHandler(esp_http_client_event_t* evt)
         }
         break;
     }
+
+    case HTTP_EVENT_ON_FINISH:
+        ctx->hopFinished = true;
+        break;
 
     default:
         break;

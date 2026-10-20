@@ -138,6 +138,9 @@ public:
                 fireData(c.data(), c.size());
             }
             if (closed) return ESP_FAIL;
+            // esp_http_client_perform() ends every pass of its redirect loop
+            // with ON_FINISH, on IDF 4.4 and 5.x alike.
+            fireFinish();
         }
 
         currentStatus = step.status;
@@ -163,6 +166,7 @@ public:
             fireData(c.data(), c.size());
         }
         if (closed) return ESP_FAIL;
+        if (step.performResult == ESP_OK) fireFinish();
         return step.performResult;
     }
 
@@ -210,6 +214,14 @@ private:
         evt.user_data = config.user_data;
         evt.header_key = const_cast<char*>(k);
         evt.header_value = const_cast<char*>(v);
+        config.event_handler(&evt);
+    }
+    void fireFinish() {
+        if (!config.event_handler) return;
+        esp_http_client_event_t evt = {};
+        evt.event_id = HTTP_EVENT_ON_FINISH;
+        evt.client = this;
+        evt.user_data = config.user_data;
         config.event_handler(&evt);
     }
     void fireData(const char* d, size_t n) {
