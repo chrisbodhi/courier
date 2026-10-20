@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- `HttpTransport::fetch()` sends requests whose headers outgrow `esp_http_client`'s default 512-byte transmit buffer, such as `Authorization: Bearer <token>` with a 512-character token. The request line and headers must fit `buffer_size_tx`, and with a single header too long for it `esp_http_client` logs `Buffer length is small to fit all the headers` and never finishes writing the request. `perform()` then fails like a transport error, so the fetch was retried (with DNS flushes) until its retries ran out and never reached the server. `fetch()` now sets `buffer_size_tx` from the request it sends (method, URL, `FetchOptions::headers`, Content-Type, plus room for `esp_http_client`'s own headers) when that is larger than the default, and leaves the default otherwise. `onConfigure` and `FetchOptions::configure` still run after it and can override it. Retry classification is unchanged: `esp_http_client` gives no error of its own for this case.
 - `HttpTransport::fetch()`: a redirect that sends no body no longer leaks its headers into the final `Response`. The collected headers (`Content-Type`, `Content-Length`, `Date`, `Retry-After`) were cleared between hops only once a hop had delivered body data, so, for example, a `302` with `Content-Length: 0` followed by a chunked `200` reported `header("Content-Length")` as `"0"`. A new hop now starts at `esp_http_client`'s `HTTP_EVENT_ON_FINISH`, which it sends at the end of every hop on IDF 4.4 and 5.x.
 
 ---
