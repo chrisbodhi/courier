@@ -79,6 +79,7 @@ void Response::moveFrom(Response& other)
     _contentType = std::move(other._contentType);
     _contentLengthStr = std::move(other._contentLengthStr);
     _date = std::move(other._date);
+    _retryAfter = std::move(other._retryAfter);
     other._body = nullptr;
     other._size = 0;
     other._alloc = 0;
@@ -93,6 +94,8 @@ const char* Response::header(const char* name) const
         return _contentLengthStr.empty() ? nullptr : _contentLengthStr.c_str();
     if (strcasecmp(name, "Date") == 0)
         return _date.empty() ? nullptr : _date.c_str();
+    if (strcasecmp(name, "Retry-After") == 0)
+        return _retryAfter.empty() ? nullptr : _retryAfter.c_str();
     return nullptr;
 }
 
@@ -102,6 +105,7 @@ void Response::captureHeader(const char* key, const char* value)
     if (strcasecmp(key, "Content-Type") == 0) _contentType = value;
     else if (strcasecmp(key, "Content-Length") == 0) _contentLengthStr = value;
     else if (strcasecmp(key, "Date") == 0) _date = value;
+    else if (strcasecmp(key, "Retry-After") == 0) _retryAfter = value;
 }
 
 void Response::resetForNewHop()
@@ -114,6 +118,7 @@ void Response::resetForNewHop()
     _contentType.clear();
     _contentLengthStr.clear();
     _date.clear();
+    _retryAfter.clear();
 }
 
 char* Response::releaseBody(size_t* outLen)

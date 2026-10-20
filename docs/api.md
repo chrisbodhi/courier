@@ -725,7 +725,7 @@ Move-only value type returned by `fetch()`. Owns its buffered body (PSRAM-prefer
 | `const char* text()` | Buffered body (NUL-terminated; `""` in streaming mode) |
 | `size_t size()` | Body byte length |
 | `bool json(JsonDocument& doc)` | Parse the body as JSON; returns `false` on empty body or parse error |
-| `const char* header(const char* name)` | Collected header (`Content-Type`, `Content-Length`, `Date`); `nullptr` if absent |
+| `const char* header(const char* name)` | Collected header (`Content-Type`, `Content-Length`, `Date`, `Retry-After`); `nullptr` if absent |
 
 Transport-failure sentinels (in `namespace Courier::Http`): `ErrNoWifi` (`-1000`), `ErrDns` (`-1001`, reserved), `ErrConnect` (`-1002`), `ErrTimeout` (`-1003`), `ErrTooLarge` (`-1004`), `ErrAborted` (`-1005`). Retries apply only to these; any real HTTP status is returned as-is.
 

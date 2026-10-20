@@ -54,9 +54,9 @@ public:
         return deserializeJson(doc, (const char*)_body)
                == DeserializationError::Ok;
     }
-    // Collected response headers: Content-Type, Content-Length, Date.
-    // Returns nullptr when absent. (Other headers: use FetchOptions::configure
-    // or onResponse.)
+    // Collected response headers: Content-Type, Content-Length, Date,
+    // Retry-After. Returns nullptr when absent. (Other headers: use
+    // FetchOptions::configure or onResponse.)
     const char* header(const char* name) const;
 
 private:
@@ -68,6 +68,7 @@ private:
     std::string _contentType;
     std::string _contentLengthStr;
     std::string _date;
+    std::string _retryAfter;
 
     void moveFrom(Response& other);
     bool appendBody(const char* data, size_t len, size_t cap);

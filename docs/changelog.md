@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- `Response::header("Retry-After")`: the response's `Retry-After`, as the server sent it (delta-seconds or an HTTP date), or `nullptr` when absent. A caller can now wait as a `429 Too Many Requests` or `503 Service Unavailable` asks.
+
+---
+
 ## v0.9.2
 
 ### Fixed
