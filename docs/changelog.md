@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.10.0-dev (1ab1572)
+## v0.10.0-dev
 
 ### New
 
