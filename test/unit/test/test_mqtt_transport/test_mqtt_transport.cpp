@@ -562,8 +562,7 @@ void test_mqtt_on_configure_not_set_works() {
 }
 
 // Phase 8: topic-aware receive hook — onMessage(topic, payload, len) fires
-// alongside the existing payload-only callbacks, threading topic through the
-// FIFO via the parallel topic queue.
+// alongside the existing payload-only callbacks.
 static int onMessageCount = 0;
 static char lastTopicBuf[256] = "";
 static char lastPayloadBuf[512] = "";
@@ -590,6 +589,75 @@ void test_onMessage_receives_topic_and_payload() {
     TEST_ASSERT_EQUAL(1, onMessageCount);
     TEST_ASSERT_EQUAL_STRING("devices/foo/temp", lastTopicBuf);
     TEST_ASSERT_EQUAL_STRING("{\"v\":42}", lastPayloadBuf);
+}
+
+// Messages after one dropped on a full queue arrive on their own topics.
+static std::string topicLog;
+
+void test_dropped_message_does_not_shift_later_topics() {
+    topicLog.clear();
+    mqtt = createWithTopics();
+    mqtt->onMessage([](const char* topic, const char* payload, size_t len) {
+        (void)payload; (void)len;
+        topicLog += topic;
+        topicLog += ";";
+    });
+    mqtt->begin("host", 443, "/path");
+    auto* client = MockMqttClient::lastInstance();
+
+    for (int i = 0; i < 8; i++) {
+        client->simulateMessage("devices/dev123/event", "{\"type\":\"fill\"}");
+    }
+    client->simulateMessage("devices/dev123/status", "{\"type\":\"dropped\"}");
+    mqtt->loop();
+    TEST_ASSERT_EQUAL(8, deliveredMessageCount);
+
+    topicLog.clear();
+    client->simulateMessage("devices/dev123/command", "{\"type\":\"a\"}");
+    client->simulateMessage("devices/other789/event", "{\"type\":\"b\"}");
+    mqtt->loop();
+    TEST_ASSERT_EQUAL_STRING("devices/dev123/command;devices/other789/event;",
+                             topicLog.c_str());
+}
+
+// The IDF event task queues while loop() drains on another task. Each
+// payload names its topic; the test fails on a mismatch or a missing topic.
+static std::atomic<int> pairedCount{0};
+static std::atomic<int> mismatchCount{0};
+
+void test_topic_stays_paired_with_payload_under_concurrent_drain() {
+    pairedCount = 0;
+    mismatchCount = 0;
+    mqtt = createWithTopics();
+    mqtt->onMessage([](const char* topic, const char* payload, size_t len) {
+        pairedCount++;
+        if (strncmp(topic, "t/", 2) != 0 || strlen(topic + 2) != len ||
+            memcmp(topic + 2, payload, len) != 0) {
+            mismatchCount++;
+        }
+    });
+    mqtt->begin("host", 443, "/path");
+    auto* client = MockMqttClient::lastInstance();
+
+    std::atomic<bool> producing{true};
+    std::thread producer([&]() {
+        char topic[24];
+        char payload[16];
+        for (int i = 0; i < 20000; i++) {
+            snprintf(payload, sizeof(payload), "%d", i);
+            snprintf(topic, sizeof(topic), "t/%s", payload);
+            client->simulateMessage(topic, payload);
+            if (i % 8 == 0) std::this_thread::yield();
+        }
+        producing.store(false);
+    });
+    while (producing.load()) mqtt->loop();
+    producer.join();
+    mqtt->loop();
+
+    TEST_ASSERT_EQUAL(0, mismatchCount.load());
+    TEST_ASSERT_EQUAL(deliveredMessageCount, pairedCount.load());
+    TEST_ASSERT_TRUE(pairedCount.load() > 0);
 }
 
 
@@ -1350,6 +1418,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_multiple_errors_delivered_in_order_on_one_loop);
     RUN_TEST(test_error_without_registered_callback_is_safe);
     RUN_TEST(test_error_with_null_handle_does_not_crash);
+    RUN_TEST(test_dropped_message_does_not_shift_later_topics);
+    RUN_TEST(test_topic_stays_paired_with_payload_under_concurrent_drain);
     RUN_TEST(test_error_reporting_does_not_disturb_message_delivery);
     RUN_TEST(test_error_queue_overflow_drops_without_corrupting_earlier_reports);
     RUN_TEST(test_queue_recovers_after_overflow);

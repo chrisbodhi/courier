@@ -26,6 +26,8 @@ typedef int esp_err_t;
 #define ESP_ERR_HTTP_CONNECT      (ESP_ERR_HTTP_BASE + 2)
 #define ESP_ERR_HTTP_FETCH_HEADER (ESP_ERR_HTTP_BASE + 4)
 
+#define DEFAULT_HTTP_BUF_SIZE (512)
+
 typedef enum {
     HTTP_EVENT_ERROR = 0,
     HTTP_EVENT_ON_CONNECTED,
@@ -120,6 +122,16 @@ public:
         ScriptStep step = s_defaultStep;
         if (s_scriptIndex < (int)s_script.size()) step = s_script[s_scriptIndex++];
 
+        if (!requestFitsTxBuffer()) {
+            // esp_http_client could not build the request in its transmit
+            // buffer: the server never sees a complete request, no events
+            // fire, and perform() fails as a transport-class error would.
+            s_txOverflowCount++;
+            currentStatus = 0;
+            currentContentLength = -1;
+            return ESP_FAIL;
+        }
+
         if (step.performResult != ESP_OK && step.status < 100) {
             // Transport-class failure: server never reached, no events fire.
             currentStatus = 0;
@@ -138,6 +150,9 @@ public:
                 fireData(c.data(), c.size());
             }
             if (closed) return ESP_FAIL;
+            // esp_http_client_perform() ends every pass of its redirect loop
+            // with ON_FINISH, on IDF 4.4 and 5.x alike.
+            fireFinish();
         }
 
         currentStatus = step.status;
@@ -163,6 +178,7 @@ public:
             fireData(c.data(), c.size());
         }
         if (closed) return ESP_FAIL;
+        if (step.performResult == ESP_OK) fireFinish();
         return step.performResult;
     }
 
@@ -173,6 +189,7 @@ public:
         s_performCount = 0;
         s_cleanupCount = 0;
         s_instanceCount = 0;
+        s_txOverflowCount = 0;
         s_lastInstance = nullptr;
         s_lastConfig = {};
         s_defaultStep = ScriptStep{};
@@ -193,11 +210,75 @@ public:
         s_defaultStep.bodyChunks = {"{}"};
     }
 
+    // Models esp_http_client's request writer on IDF 4.4 and 5.x
+    // (http_client_prepare_first_line and esp_http_client_request_send in
+    // esp_http_client.c, http_header_generate_string in lib/http_header.c).
+    // The request line must fit buffer_size_tx (0 = DEFAULT_HTTP_BUF_SIZE).
+    // Headers are then written in buffer-sized pieces, the first sharing the
+    // buffer with the request line; a header line that cannot fit in an
+    // otherwise empty piece leaves the request unfinished. The header list is
+    // what IDF builds: User-Agent and Host from init, the caller's headers,
+    // set_post_field's default Content-Type, then Content-Length (body or
+    // non-GET/HEAD/DELETE).
+    bool requestFitsTxBuffer() const {
+        static const char* kMethods[] = {"GET", "POST", "PUT", "PATCH",
+                                         "DELETE", "HEAD"};
+        int buf = config.buffer_size_tx > 0 ? config.buffer_size_tx
+                                            : DEFAULT_HTTP_BUF_SIZE;
+        std::string host, target = "/";
+        size_t scheme = url.find("://");
+        size_t hostStart = scheme == std::string::npos ? 0 : scheme + 3;
+        size_t slash = url.find('/', hostStart);
+        host = url.substr(hostStart, slash == std::string::npos
+                                         ? std::string::npos
+                                         : slash - hostStart);
+        if (slash != std::string::npos) target = url.substr(slash);
+
+        int firstLine = (int)(strlen(kMethods[config.method]) + 1 +
+                              target.size() + strlen(" HTTP/1.1\r\n"));
+        if (firstLine >= buf) return false;
+
+        std::vector<std::pair<std::string, std::string>> headers = {
+            {"User-Agent", "ESP32 HTTP Client/1.0"}, {"Host", host}};
+        bool hasContentType = false;
+        for (auto& h : requestHeaders) {
+            headers.push_back(h);
+            if (h.first == "Content-Type") hasContentType = true;
+        }
+        if (!postBody.empty() && !hasContentType) {
+            // esp_http_client_set_post_field's default.
+            headers.push_back(
+                {"Content-Type", "application/x-www-form-urlencoded"});
+        }
+        bool lengthRequired = config.method != HTTP_METHOD_GET &&
+                              config.method != HTTP_METHOD_HEAD &&
+                              config.method != HTTP_METHOD_DELETE;
+        if (!postBody.empty() || lengthRequired) {
+            headers.push_back(
+                {"Content-Length", std::to_string(postBody.size())});
+        }
+
+        int avail = buf - firstLine;
+        int used = 0;
+        for (auto& h : headers) {
+            int line = (int)(h.first.size() + h.second.size() + 4);
+            if (used + line + 1 > avail - 2) {
+                if (used == 0) return false;  // cannot fit even on its own
+                avail = buf;                   // next piece, whole buffer
+                used = 0;
+                if (line + 1 > avail - 2) return false;
+            }
+            used += line;
+        }
+        return true;
+    }
+
     static MockHttpClient* lastInstance() { return s_lastInstance; }
     static const esp_http_client_config_t& lastConfig() { return s_lastConfig; }
     static int performCount() { return s_performCount; }
     static int cleanupCount() { return s_cleanupCount; }
     static int instanceCount() { return s_instanceCount; }
+    static int txOverflowCount() { return s_txOverflowCount; }
 
     inline static int s_cleanupCount = 0;
 
@@ -210,6 +291,14 @@ private:
         evt.user_data = config.user_data;
         evt.header_key = const_cast<char*>(k);
         evt.header_value = const_cast<char*>(v);
+        config.event_handler(&evt);
+    }
+    void fireFinish() {
+        if (!config.event_handler) return;
+        esp_http_client_event_t evt = {};
+        evt.event_id = HTTP_EVENT_ON_FINISH;
+        evt.client = this;
+        evt.user_data = config.user_data;
         config.event_handler(&evt);
     }
     void fireData(const char* d, size_t n) {
@@ -227,6 +316,7 @@ private:
     inline static int s_scriptIndex = 0;
     inline static int s_performCount = 0;
     inline static int s_instanceCount = 0;
+    inline static int s_txOverflowCount = 0;
     inline static MockHttpClient* s_lastInstance = nullptr;
     inline static esp_http_client_config_t s_lastConfig = {};
     inline static ScriptStep s_defaultStep;

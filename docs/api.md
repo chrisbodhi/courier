@@ -93,13 +93,25 @@ courier.suspend();
 courier.resume();
 ```
 
-`reconnect()` is a manual trigger for the connection-recovery state machine. It tears down all transports, fires `onDisconnected`, and transitions to `State::Reconnecting`. The state-machine handler then adapts: if WiFi is down it re-runs the WiFi connect step; if WiFi is fine it retries transports directly. `onTransportsWillConnect` re-fires on the way back through `TransportsConnecting`.
+`reconnect()` is a manual trigger for the connection-recovery state machine. It tears down all transports, fires `onDisconnected`, and transitions to `State::Reconnecting`. The state-machine handler then adapts: if WiFi is down it re-runs the WiFi connect step; if WiFi is fine it retries transports directly. `onNetworkReady` and `onTransportsWillConnect` re-fire on the way back through `NetworkReady`.
 
 ```cpp
 courier.reconnect();   // re-registration / "kick the connection"
 ```
 
 Use it for re-registration flows, manual reconnect triggers, or recovering from application-level state errors that warrant a fresh connect cycle.
+
+`enterNetworkReady()` tears down all transports, fires `onDisconnected`, and transitions to `State::NetworkReady`, keeping WiFi and the clock: no WiFi reconnect, no backoff, no time sync. The `onNetworkReady` hook runs on the next `loop()`; when it returns, the machine continues through `onTransportsWillConnect` and `TransportsConnecting` as on boot. Valid from `Connected` and `TransportsConnecting`; from any other state it returns `false` and does nothing. Called mid-handshake (from `TransportsConnecting`), the teardown can block until a transport's stop call returns, up to its network timeout.
+
+```cpp
+courier.onNetworkReady([]() {
+  if (!downloadPending) return;
+  downloadPending = false;  // the hook re-fires on every later reconnect
+  // HTTPS download with no other TLS session open
+});
+
+if (courier.enterNetworkReady()) downloadPending = true;
+```
 
 ### State
 
@@ -206,6 +218,7 @@ courier.onError([](const char* category, const char* msg) { /* any failure */ })
 
 // Lifecycle hooks. Use these for token exchange or registration that must
 // complete before transports connect / right after they connect.
+courier.onNetworkReady([]() { /* WiFi up, time sync attempted, no transports */ });
 courier.onTransportsWillConnect([]() { /* before transports start */ });
 courier.onTransportsDidConnect([]()  { /* after transports connect */ });
 ```
@@ -222,6 +235,8 @@ courier.onConfigureWiFi([](WiFiManager& wm) {
 ```
 
 The `onConfigureWiFi` callback fires before `WiFiManager::autoConnect()` — use it for timeouts, hostname, custom parameters, etc.
+
+Where several access points serve the SSID, `Client` joins the strongest: before each `autoConnect()` it sets an all-channel scan sorted by signal (`WIFI_ALL_CHANNEL_SCAN`, `WIFI_CONNECT_AP_BY_SIGNAL`) on `WiFi` and in the stored STA config. A BSSID pinned in that config is honoured. There is no roaming while connected.
 
 ## `Courier::Transport` (base)
 
@@ -313,16 +328,21 @@ enum class Courier::State {
     Connected,
     Reconnecting,
     ConnectionFailed,
+    NetworkReady,  // last to keep existing values; lifecycle: WifiConnected -> NetworkReady -> TransportsConnecting
 };
 ```
 
 ```
-Booting -> WifiConnecting -> WifiConnected -> TransportsConnecting -> Connected
-                                                       ^                  |
-                                                  Reconnecting <----------+
-                                                       |
-                                               ConnectionFailed
+Booting -> WifiConnecting -> WifiConnected -> NetworkReady -> TransportsConnecting -> Connected
+                                   ^                ^                                     |
+                                   |                +-------- enterNetworkReady() --------+
+                                   |                                                      |
+                             Reconnecting <-----------------------------------------------+
+                                   |
+                           ConnectionFailed
 ```
+
+`NetworkReady` is where WiFi is up and time sync has been attempted, so TLS can validate certificates, but no persistent transport is running. `onNetworkReady` runs there, blocking, on every entry — boot, each reconnect cycle that finds WiFi up, and `enterNetworkReady()`. A hook with nothing to do should return immediately. If WiFi is down when `NetworkReady` is entered, or drops while the hook runs, the machine goes back to `WifiConnecting` (re-attempting time sync) instead of starting transports; `onDisconnected` does not fire again.
 
 `onConnectionChange` fires on every transition. `onError` fires alongside transitions caused by failures, with a category string (`"WIFI"`, `"TRANSPORT"`, `"TIME_SYNC"`, etc.) and a reason.
 
@@ -705,7 +725,7 @@ Move-only value type returned by `fetch()`. Owns its buffered body (PSRAM-prefer
 | `const char* text()` | Buffered body (NUL-terminated; `""` in streaming mode) |
 | `size_t size()` | Body byte length |
 | `bool json(JsonDocument& doc)` | Parse the body as JSON; returns `false` on empty body or parse error |
-| `const char* header(const char* name)` | Collected header (`Content-Type`, `Content-Length`, `Date`); `nullptr` if absent |
+| `const char* header(const char* name)` | Collected header (`Content-Type`, `Content-Length`, `Date`, `Retry-After`); `nullptr` if absent |
 
 Transport-failure sentinels (in `namespace Courier::Http`): `ErrNoWifi` (`-1000`), `ErrDns` (`-1001`, reserved), `ErrConnect` (`-1002`), `ErrTimeout` (`-1003`), `ErrTooLarge` (`-1004`), `ErrAborted` (`-1005`). Retries apply only to these; any real HTTP status is returned as-is.
 
@@ -722,6 +742,8 @@ Transport-failure sentinels (in `namespace Courier::Http`): `ErrNoWifi` (`-1000`
 | `onResponse` | `ResponseCallback` | — | Streaming: fires once with `(status, contentLength)` before body chunks |
 | `onBody` | `BodyCallback` | — | Streaming: `(data, len)` per chunk; return `false` to abort (OTA-download shaped) |
 | `configure` | `ConfigureCallback` | — | Per-call raw-config trapdoor (`esp_http_client_config_t&`) |
+
+Request headers have no fixed length limit. `esp_http_client` writes the request line and headers into one transmit buffer (`buffer_size_tx`, `512` bytes by default), so `fetch()` sizes it for the request it sends: the method, the URL (for the request line and `Host`), every `headers` entry and the JSON content-type, plus room for the headers `esp_http_client` adds itself. A request that fits in `512` bytes keeps the default. A long `Authorization: Bearer ...` value (a JWT, a signature) therefore works as-is. `onConfigure` and `configure` run after the sizing and can set `buffer_size_tx` themselves, for example when a redirect leads to a much longer URL than the one fetched (the buffer is allocated once per request, for the first URL).
 
 Setting `onBody` switches to streaming mode: the `Response` carries status and headers but no buffered body, and chunks arrive via the callback (abortable). Otherwise the body is buffered up to `maxResponseBytes`.
 

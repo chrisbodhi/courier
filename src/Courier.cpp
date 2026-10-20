@@ -5,6 +5,7 @@
 #include <ezTime.h>
 #ifdef ESP_PLATFORM
 #include <esp_netif.h>
+#include <esp_wifi.h>
 #endif
 
 namespace Courier {
@@ -94,8 +95,10 @@ void Client::loop()
   // latch) means a genuine NTP correction can repair a system clock that was
   // never bridged, poisoned by a bad HTTP Date, or has simply drifted -
   // small ongoing differences are left alone so this doesn't fight ezTime's
-  // own continuous drift correction on every loop() call.
-  if (timeStatus() == timeSet) {
+  // own continuous drift correction on every loop() call. Gated on the clock
+  // having been set at all, not on ezTime calling it fresh: an overdue NTP
+  // refresh (timeNeedsSync) still leaves ezTime the better clock to follow.
+  if (timeStatus() != timeNotSet) {
     time_t nowUtc = UTC.now();
     if (nowUtc > 0) {
       time_t sysClock = getSystemClock();
@@ -119,6 +122,9 @@ void Client::loop()
     break;
   case State::WifiConnected:
     handleWifiConnectedState();
+    break;
+  case State::NetworkReady:
+    handleNetworkReadyState();
     break;
   case State::TransportsConnecting:
     handleTransportsConnectingState();
@@ -144,6 +150,7 @@ void Client::handleWifiConnectingState()
   {
     _wm.setAPCallback(staticWifiFailedCallback);
     _wm.setConnectTimeout(20);
+    preferStrongestAccessPoint();
     // Let users configure WiFiManager before autoConnect
     if (_wifiConfigureCallback) _wifiConfigureCallback(_wm);
     int res = _wm.autoConnect(_apName.c_str());
@@ -226,6 +233,29 @@ void Client::handleWifiConnectedState()
     _timeSyncAttempted = true;
   }
 
+  transitionTo(State::NetworkReady);
+}
+
+void Client::handleNetworkReadyState()
+{
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[courier] WiFi down in NetworkReady - resetting to WiFi connection state");
+    restartWifiConnect();
+    return;
+  }
+
+  fireNetworkReadyHooks();
+
+  // The hook may have moved the machine on (e.g. by calling reconnect()).
+  if (_state != State::NetworkReady) return;
+
+  // WiFi may have dropped while the hook blocked.
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[courier] WiFi lost during onNetworkReady - resetting to WiFi connection state");
+    restartWifiConnect();
+    return;
+  }
+
   // Fire onTransportsWillConnect hooks (e.g. registration)
   fireWillConnectHooks();
 
@@ -278,7 +308,13 @@ void Client::handleTransportsConnectingState()
     // Fire onTransportsDidConnect hooks
     fireDidConnectHooks();
 
+    // The hook may have moved the machine on (e.g. by calling enterNetworkReady()).
+    if (_state != State::TransportsConnecting) return;
+
     transitionTo(State::Connected);
+
+    // An onConnectionChange callback may have moved the machine on.
+    if (_state != State::Connected) return;
 
     // Fire connected callbacks
     fireConnectedCallbacks();
@@ -378,11 +414,7 @@ void Client::handleReconnectingState()
   if (WiFi.status() != WL_CONNECTED)
   {
     Serial.println("[courier] WiFi lost - resetting to WiFi connection state");
-    WiFi.disconnect();
-    transitionTo(State::WifiConnecting);
-    _timeSyncAttempted = false;
-    _reconnect.attempts = 0;
-    _reconnect.currentInterval = MIN_RECONNECT_INTERVAL;
+    restartWifiConnect();
     return;
   }
 
@@ -405,10 +437,55 @@ void Client::handleConnectionFailedState()
 
 // --- WiFi helpers ---
 
+// Drops the WiFi link and returns to WifiConnecting with a fresh time sync
+// and backoff. Fires no onDisconnected: callers either never had transports
+// or have already fired it.
+void Client::restartWifiConnect()
+{
+  WiFi.disconnect();
+  _timeSyncAttempted = false;
+  _reconnect.attempts = 0;
+  _reconnect.currentInterval = MIN_RECONNECT_INTERVAL;
+  transitionTo(State::WifiConnecting);
+}
+
 void Client::setupWiFi()
 {
   WiFi.mode(WIFI_STA);
+  preferStrongestAccessPoint();
   _wm.setConfigPortalBlocking(false);
+}
+
+// An SSID served by several access points is joined on the strongest one.
+// WIFI_FAST_SCAN, the Arduino default, joins the first matching AP it hears,
+// starting from the channel ESP-IDF stored at the last connection, so a
+// device keeps rejoining a distant AP. An all-channel scan visits every
+// channel whatever that hint, then joins by the sort method.
+//
+// WiFi.setScanMethod/setSortMethod apply to WiFi.begin(ssid, pass), which
+// WiFiManager calls for credentials entered in the portal. autoConnect()
+// joins the saved network with WiFi.begin(), which reuses the stored STA
+// config unchanged, so the stored config's scan and sort methods are
+// rewritten as well. The Arduino core's auto-reconnect after a drop reuses
+// that config. A BSSID pinned by the application is left in place.
+void Client::preferStrongestAccessPoint()
+{
+#ifdef ESP_PLATFORM
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+
+  wifi_config_t conf;
+  if (esp_wifi_get_config(WIFI_IF_STA, &conf) != ESP_OK) return;
+  if (conf.sta.scan_method == WIFI_ALL_CHANNEL_SCAN &&
+      conf.sta.sort_method == WIFI_CONNECT_AP_BY_SIGNAL) {
+    return;
+  }
+  conf.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+  conf.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+  if (esp_wifi_set_config(WIFI_IF_STA, &conf) != ESP_OK) {
+    Serial.println("[courier] Failed to set all-channel WiFi scan");
+  }
+#endif
 }
 
 void Client::launchWiFiConfigPortal()
@@ -670,6 +747,19 @@ void Client::reconnect()
   transitionTo(State::Reconnecting);
 }
 
+bool Client::enterNetworkReady()
+{
+  if (_state != State::Connected && _state != State::TransportsConnecting) {
+    return false;
+  }
+  Serial.println("[courier] Entering NetworkReady - tearing down transports");
+  teardownAllTransports();
+  _reconnect.disconnectedCallbacksFired = true;
+  fireDisconnectedCallbacks();
+  transitionTo(State::NetworkReady);
+  return true;
+}
+
 // --- State queries ---
 
 bool Client::isConnected() const
@@ -684,7 +774,12 @@ bool Client::isConnected() const
 
 bool Client::isTimeSynced() const
 {
-  return timeStatus() == timeSet;
+  // Not == timeSet: ezTime drops to timeNeedsSync when an NTP refresh is
+  // overdue (NTP_INTERVAL + NTP_STALE_AFTER, ~90 min). On a network that
+  // blocks NTP — first sync from the HTTP Date header — that would read as
+  // "unsynced" an hour and a half after boot while the clock runs on, good
+  // to a couple of seconds a day.
+  return timeStatus() != timeNotSet;
 }
 
 // --- AP name ---
@@ -719,6 +814,11 @@ void Client::onConnectionChange(ConnectionChangeCallback cb)
 void Client::onError(ErrorCallback cb)
 {
   _errorCallback = cb;
+}
+
+void Client::onNetworkReady(Callback cb)
+{
+  _networkReadyHook = cb;
 }
 
 void Client::onTransportsWillConnect(Callback cb)
@@ -757,6 +857,11 @@ void Client::transitionTo(State newState)
 void Client::fireConnectionChangeCallbacks()
 {
   if (_connectionChangeCallback) _connectionChangeCallback(_state);
+}
+
+void Client::fireNetworkReadyHooks()
+{
+  if (_networkReadyHook) _networkReadyHook();
 }
 
 void Client::fireWillConnectHooks()

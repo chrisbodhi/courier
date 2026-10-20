@@ -61,6 +61,37 @@ static esp_http_client_method_t methodFromString(const char* m)
     return HTTP_METHOD_GET;
 }
 
+// Room for the headers esp_http_client adds itself: User-Agent,
+// Content-Length or Transfer-Encoding, a default Content-Type for a raw body,
+// a Basic Authorization from URL userinfo, and its own end-of-buffer slack.
+static constexpr size_t TX_HEADER_SLACK = 192;
+
+// Bytes esp_http_client's transmit buffer needs to hold this request's
+// request line and every header in one piece. esp_http_client writes the
+// request line and headers into a single buffer_size_tx buffer; a request
+// line that does not fit, or a header line that cannot fit on its own, leaves
+// the request unsent or unfinished (http_client_prepare_first_line,
+// esp_http_client_request_send, http_header_generate_string, IDF 4.4 and
+// 5.x). The URL is counted twice, covering the path and query of the request
+// line and the Host header.
+static size_t requestTxBytes(const char* method, const char* url,
+                             const HttpTransport::FetchOptions& opts,
+                             const char* contentType)
+{
+    size_t urlLen = url ? strlen(url) : 0;
+    size_t n = strlen(method) + 1 + urlLen + strlen(" HTTP/1.1\r\n");
+    n += strlen("Host: \r\n") + urlLen;
+    for (size_t i = 0; i < opts.headerCount; i++) {
+        const char* name = opts.headers[i].name;
+        const char* value = opts.headers[i].value;
+        n += (name ? strlen(name) : 0) + (value ? strlen(value) : 0) +
+             strlen(": \r\n");
+    }
+    if (contentType) n += strlen("Content-Type: \r\n") + strlen(contentType);
+    n += strlen("\r\n");
+    return n + TX_HEADER_SLACK;
+}
+
 bool HttpTransport::isConnected() const
 {
     return _begun && wifiUp();
@@ -79,6 +110,7 @@ void Response::moveFrom(Response& other)
     _contentType = std::move(other._contentType);
     _contentLengthStr = std::move(other._contentLengthStr);
     _date = std::move(other._date);
+    _retryAfter = std::move(other._retryAfter);
     other._body = nullptr;
     other._size = 0;
     other._alloc = 0;
@@ -93,6 +125,8 @@ const char* Response::header(const char* name) const
         return _contentLengthStr.empty() ? nullptr : _contentLengthStr.c_str();
     if (strcasecmp(name, "Date") == 0)
         return _date.empty() ? nullptr : _date.c_str();
+    if (strcasecmp(name, "Retry-After") == 0)
+        return _retryAfter.empty() ? nullptr : _retryAfter.c_str();
     return nullptr;
 }
 
@@ -102,6 +136,7 @@ void Response::captureHeader(const char* key, const char* value)
     if (strcasecmp(key, "Content-Type") == 0) _contentType = value;
     else if (strcasecmp(key, "Content-Length") == 0) _contentLengthStr = value;
     else if (strcasecmp(key, "Date") == 0) _date = value;
+    else if (strcasecmp(key, "Retry-After") == 0) _retryAfter = value;
 }
 
 void Response::resetForNewHop()
@@ -114,6 +149,7 @@ void Response::resetForNewHop()
     _contentType.clear();
     _contentLengthStr.clear();
     _date.clear();
+    _retryAfter.clear();
 }
 
 char* Response::releaseBody(size_t* outLen)
@@ -155,6 +191,7 @@ struct HttpTransport::FetchCtx {
     bool streaming = false;
     bool responseFired = false;
     bool sawBody = false;
+    bool hopFinished = false;  // ON_FINISH: the next ON_HEADER is a new hop
     bool tooLarge = false;
     bool aborted = false;
 };
@@ -166,15 +203,15 @@ esp_err_t HttpTransport::eventHandler(esp_http_client_event_t* evt)
 
     switch (evt->event_id) {
     case HTTP_EVENT_ON_HEADER:
-        if (ctx->responseFired || ctx->sawBody) {
-            // Headers arriving after we'd already latched a response for a
-            // previous hop means esp_http_client just followed a redirect
-            // (the prior hop's body — e.g. a redirect page — had data of its
-            // own). Discard that hop's accumulated body/headers so they
+        if (ctx->hopFinished) {
+            // esp_http_client_perform() ends every hop with ON_FINISH, so
+            // headers after one mean it is following a redirect. Discard the
+            // previous hop's body and headers, body or no body, so they
             // don't bleed into (or concatenate with) the new hop's response.
             ctx->resp->resetForNewHop();
             ctx->responseFired = false;
             ctx->sawBody = false;
+            ctx->hopFinished = false;
         }
         ctx->resp->captureHeader(evt->header_key, evt->header_value);
         break;
@@ -219,6 +256,10 @@ esp_err_t HttpTransport::eventHandler(esp_http_client_event_t* evt)
         break;
     }
 
+    case HTTP_EVENT_ON_FINISH:
+        ctx->hopFinished = true;
+        break;
+
     default:
         break;
     }
@@ -250,6 +291,9 @@ Response HttpTransport::performOnce(const char* url, const FetchOptions& opts,
     } else if (_cfg.use_cert_bundle) {
         cfg.crt_bundle_attach = esp_crt_bundle_attach;
     }
+    // 0 leaves esp_http_client's DEFAULT_HTTP_BUF_SIZE in place.
+    size_t txBytes = requestTxBytes(methodStr, url, opts, contentType);
+    if (txBytes > DEFAULT_HTTP_BUF_SIZE) cfg.buffer_size_tx = (int)txBytes;
     if (_configureCallback) _configureCallback(cfg);
     if (opts.configure) opts.configure(cfg);
     // Reserved fields — the response plumbing rides on these; re-assert

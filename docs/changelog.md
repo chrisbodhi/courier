@@ -1,5 +1,60 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- `Response::header("Retry-After")`: the response's `Retry-After`, as the server sent it (delta-seconds or an HTTP date), or `nullptr` when absent. A caller can now wait as a `429 Too Many Requests` or `503 Service Unavailable` asks.
+
+### Fixed
+
+- `HttpTransport::fetch()` sends requests whose headers outgrow `esp_http_client`'s default 512-byte transmit buffer, such as `Authorization: Bearer <token>` with a 512-character token. The request line and headers must fit `buffer_size_tx`, and with a single header too long for it `esp_http_client` logs `Buffer length is small to fit all the headers` and never finishes writing the request. `perform()` then fails like a transport error, so the fetch was retried (with DNS flushes) until its retries ran out and never reached the server. `fetch()` now sets `buffer_size_tx` from the request it sends (method, URL, `FetchOptions::headers`, Content-Type, plus room for `esp_http_client`'s own headers) when that is larger than the default, and leaves the default otherwise. `onConfigure` and `FetchOptions::configure` still run after it and can override it. Retry classification is unchanged: `esp_http_client` gives no error of its own for this case.
+- `HttpTransport::fetch()`: a redirect that sends no body no longer leaks its headers into the final `Response`. The collected headers (`Content-Type`, `Content-Length`, `Date`, `Retry-After`) were cleared between hops only once a hop had delivered body data, so, for example, a `302` with `Content-Length: 0` followed by a chunked `200` reported `header("Content-Length")` as `"0"`. A new hop now starts at `esp_http_client`'s `HTTP_EVENT_ON_FINISH`, which it sends at the end of every hop on IDF 4.4 and 5.x.
+
+---
+
+## v0.9.2
+
+### Fixed
+
+- `Client::isTimeSynced()` stays true once the network has set the clock. It compared ezTime's status with `timeSet`, and ezTime drops to `timeNeedsSync` when an NTP refresh is overdue (`NTP_INTERVAL` + `NTP_STALE_AFTER`, about 90 minutes). On a network that blocks NTP — where the first sync comes from the HTTP Date header — the clock read as unsynced an hour and a half after boot while it ran on, good to a couple of seconds a day. It now means "set at least once" (`timeStatus() != timeNotSet`).
+- The ezTime → system clock bridge in `loop()` keeps running while an NTP refresh is overdue, for the same reason: it was gated on `timeSet` too.
+
+---
+
+## v0.9.1
+
+### Fixed
+
+- `MqttTransport` delivers every message on its own topic. A payload and its topic were queued separately and paired back up by position, so one dropped payload, or `loop()` draining between the two pushes, left every later message on the topic of the one before it until the transport was destroyed. They now travel as one queue entry. A message whose topic cannot be copied is dropped whole rather than delivered without a topic, and a reassembled multi-chunk message is handed to the queue without a second copy.
+
+---
+
+## v0.9.0
+
+### New
+
+- `State::NetworkReady`, between `WifiConnected` and `TransportsConnecting` in the lifecycle: WiFi is up and time sync has been attempted, and no persistent transport is running. If WiFi is down on entry, or drops while `onNetworkReady` runs, the machine returns to `WifiConnecting` instead of starting transports on a dead link.
+- `Client::onNetworkReady(cb)` — single-slot lifecycle hook run in `NetworkReady` on every entry, before `onTransportsWillConnect`. Blocking: the machine stays in `NetworkReady` until it returns.
+- `Client::enterNetworkReady()` — tears down all transports, fires `onDisconnected` and transitions to `NetworkReady`, keeping WiFi and the clock (no backoff, no time sync). Valid from `Connected` and `TransportsConnecting`; returns `false` from any other state. For work that needs the network but not the transports, such as a large HTTPS download that cannot share RAM with a second TLS session.
+
+### Upgrading notes
+
+- `State` gains a value, declared last so existing values keep their numbers. An exhaustive `switch` over `State` with no `default` now warns under `-Wswitch`.
+- Every connect cycle passes through `NetworkReady`: boot and each reconnect that finds WiFi up take one more `loop()` tick to reach `TransportsConnecting`, and fire one more `onConnectionChange`.
+
+### Fixed
+
+- An `onTransportsDidConnect` hook, or an `onConnectionChange` callback for `Connected`, that moves the machine on (with `reconnect()` or `enterNetworkReady()`) is no longer overwritten. The `Connected` transition and `onConnected` are skipped, where before the client was left in `Connected` with no transport running.
+- WiFi joins the strongest access point for the SSID. The Arduino default, `WIFI_FAST_SCAN`, joins the first matching AP heard, starting from the channel stored at the last connection, so a device that once joined a distant AP kept rejoining it on every boot and reconnect. `Client` now sets an all-channel scan sorted by signal, both for `WiFi.begin(ssid, pass)` (credentials from the portal) and in the stored STA config that `WiFiManager::autoConnect()` and the Arduino core's auto-reconnect reuse. It is applied before every `autoConnect()`, so Courier's WiFi reconnect path re-picks the AP too. A BSSID pinned by the application is left in place.
+
+### Known limits
+
+- The all-channel scan adds about 2.5 s to each WiFi join (measured on an ESP32-S3: ~0.6-1.2 s to ~3.0 s from STA start to associated).
+- No roaming while connected: a device stays on the AP it joined until the connection drops.
+
+---
+
 ## v0.8.0
 
 ### New

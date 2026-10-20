@@ -251,10 +251,14 @@ private:
     TopicMessageCallback _onTopicMessage;
     TopicBinaryCallback _onTopicBinary;
 
-    // Parallel topic queue, in lockstep with the base class's _pending FIFO.
-    // Stores topic strings (heap-allocated, freed on drain).
-    static constexpr size_t TOPIC_QUEUE_DEPTH = 8;
-    SpscQueue<char*, TOPIC_QUEUE_DEPTH> _topicQueue;
+    // Inbound FIFO of received messages with their topics. Both buffers are
+    // heap-owned and freed on drain; the base class's _pending is unused here.
+    struct PendingTopicMessage {
+        char*  topic;
+        char*  payload;  // NUL at payload[length]
+        size_t length;
+    };
+    SpscQueue<PendingTopicMessage, MESSAGE_QUEUE_DEPTH> _inbox;
 
     // Error reports from the IDF event task. Single-producer (that task only)
     // / single-consumer (loop()). Synchronous app-task failures are NOT routed
@@ -264,7 +268,9 @@ private:
     SpscQueue<ErrorInfo, ERROR_QUEUE_DEPTH> _errorQueue;
     ErrorCallback _onError;
 
-    void queueIncomingMqttMessage(const char* topic, const char* payload, size_t len);
+    // Takes ownership of both heap buffers (payload must hold a NUL at
+    // payload[len]) and frees them if the queue is full.
+    void queueIncomingMqttMessage(char* topic, char* payload, size_t len);
 
     static void mqttEventHandler(void* handler_arg,
                                   esp_event_base_t base,

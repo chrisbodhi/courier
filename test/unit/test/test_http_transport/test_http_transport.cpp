@@ -232,6 +232,32 @@ void test_fetch_buffered_redirect_delivers_only_final_hop() {
     TEST_ASSERT_EQUAL_STRING("Tue, 18 Feb 2026 12:05:00 GMT", r.header("Date"));
 }
 
+void test_fetch_redirect_without_body_drops_its_headers() {
+    // A redirect commonly says Content-Length: 0 and sends no body; the final
+    // response here is chunked, so it sends no Content-Length of its own.
+    MockHttpClient::ScriptStep step;
+    MockHttpClient::Hop hop1;
+    hop1.status = 302;
+    hop1.headers = {{"Content-Length", "0"},
+                    {"Date", "Tue, 18 Feb 2026 12:00:00 GMT"},
+                    {"Retry-After", "30"},
+                    {"Location", "https://example.com/final"}};
+    step.redirectHops = {hop1};
+    step.status = 200;
+    step.contentLength = -1;
+    step.headers = {{"Content-Type", "application/json"},
+                    {"Date", "Tue, 18 Feb 2026 12:05:00 GMT"}};
+    step.bodyChunks = {"{\"ok\":true}"};
+    MockHttpClient::pushScript(step);
+
+    Response r = http->fetch("https://example.com/start");
+    TEST_ASSERT_EQUAL(200, r.status);
+    TEST_ASSERT_EQUAL_STRING("{\"ok\":true}", r.text());
+    TEST_ASSERT_NULL(r.header("Content-Length"));
+    TEST_ASSERT_NULL(r.header("Retry-After"));
+    TEST_ASSERT_EQUAL_STRING("Tue, 18 Feb 2026 12:05:00 GMT", r.header("Date"));
+}
+
 void test_streaming_redirect_delivers_only_final_hop_chunks() {
     MockHttpClient::ScriptStep step;
     MockHttpClient::Hop hop1;
@@ -361,6 +387,39 @@ void test_all_retries_exhausted_returns_last_error() {
     TEST_ASSERT_EQUAL(Http::ErrConnect, r.status);
     TEST_ASSERT_EQUAL(4, MockHttpClient::performCount());  // 1 + 3 retries
     TEST_ASSERT_EQUAL(3, dnsFlushCountForTests);
+}
+
+void test_fetch_429_exposes_retry_after() {
+    MockHttpClient::ScriptStep step;
+    step.status = 429;
+    step.headers = {{"retry-after", "60"}};
+    step.bodyChunks = {"{}"};
+    MockHttpClient::pushScript(step);
+
+    Response r = http->fetch("https://example.com/api");
+    TEST_ASSERT_EQUAL(429, r.status);
+    TEST_ASSERT_EQUAL_STRING("60", r.header("Retry-After"));
+    TEST_ASSERT_EQUAL(1, MockHttpClient::performCount());
+
+    Response moved(std::move(r));
+    TEST_ASSERT_EQUAL_STRING("60", moved.header("Retry-After"));
+}
+
+void test_retry_after_comes_from_the_final_hop_only() {
+    MockHttpClient::ScriptStep step;
+    MockHttpClient::Hop hop1;
+    hop1.status = 307;
+    hop1.headers = {{"Retry-After", "5"}, {"Location", "https://example.com/final"}};
+    hop1.bodyChunks = {"<html>moved</html>"};
+    step.redirectHops = {hop1};
+    step.status = 200;
+    step.headers = {{"Content-Type", "text/plain"}};
+    step.bodyChunks = {"ok"};
+    MockHttpClient::pushScript(step);
+
+    Response r = http->fetch("https://example.com/start");
+    TEST_ASSERT_EQUAL(200, r.status);
+    TEST_ASSERT_NULL(r.header("Retry-After"));
 }
 
 void test_http_error_status_never_retries() {
@@ -564,6 +623,101 @@ void test_per_call_timeout_overrides_config() {
     TEST_ASSERT_EQUAL(2500, MockHttpClient::lastConfig().timeout_ms);
 }
 
+// A bearer token the size of a base64 RSA-3072 signature or a large JWT.
+static std::string longBearer() {
+    return "Bearer " + std::string(600, 'A');
+}
+
+// A URL whose path and query alone take over half of IDF's default buffer.
+static std::string longUrl() {
+    return "https://api.example.com/v1/devices/" + std::string(120, 'd') +
+           "/reports?cursor=" + std::string(160, 'c');
+}
+
+void test_mock_long_header_overflows_default_tx_buffer() {
+    // The failure the sizing prevents: at IDF's default buffer_size_tx the
+    // request cannot be written, so perform() fails before the server sees
+    // it, as a transport failure would.
+    std::string auth = longBearer();
+    HttpTransport::FetchOptions::Header hdrs[] = {{"Authorization", auth.c_str()}};
+    HttpTransport::FetchOptions opts;
+    opts.headers = hdrs;
+    opts.headerCount = 1;
+    opts.retries = 0;
+    opts.configure = [](esp_http_client_config_t& cfg) {
+        cfg.buffer_size_tx = DEFAULT_HTTP_BUF_SIZE;
+    };
+    Response r = http->fetch("https://example.com/x", opts);
+    TEST_ASSERT_EQUAL(Http::ErrConnect, r.status);
+    TEST_ASSERT_EQUAL(1, MockHttpClient::txOverflowCount());
+}
+
+void test_tx_buffer_fits_long_header_and_long_url() {
+    std::string auth = longBearer();
+    std::string url = longUrl();
+    HttpTransport::FetchOptions::Header hdrs[] = {
+        {"Authorization", auth.c_str()},
+        {"Accept", "application/json"},
+    };
+    JsonDocument body;
+    body["reading"] = 42;
+    HttpTransport::FetchOptions opts;
+    opts.headers = hdrs;
+    opts.headerCount = 2;
+    opts.json = &body;
+    Response r = http->fetch(url.c_str(), opts);
+
+    TEST_ASSERT_EQUAL(200, r.status);
+    TEST_ASSERT_EQUAL(1, MockHttpClient::performCount());  // no retries
+    TEST_ASSERT_EQUAL(0, MockHttpClient::txOverflowCount());
+    // The whole request fits in one piece: request line, Host, the caller's
+    // headers and Content-Type, with room left over for IDF's own.
+    int tx = MockHttpClient::lastConfig().buffer_size_tx;
+    size_t request = strlen("POST ") + url.size() + strlen(" HTTP/1.1\r\n") +
+                     strlen("Host: \r\n") + url.size() +
+                     strlen("Authorization: \r\n") + auth.size() +
+                     strlen("Accept: application/json\r\n") +
+                     strlen("Content-Type: application/json\r\n") +
+                     strlen("\r\n");
+    TEST_ASSERT_GREATER_THAN((int)request, tx);
+}
+
+void test_tx_buffer_small_request_keeps_idf_default() {
+    HttpTransport::FetchOptions::Header hdrs[] = {{"Accept", "text/plain"}};
+    HttpTransport::FetchOptions opts;
+    opts.headers = hdrs;
+    opts.headerCount = 1;
+    http->fetch("https://example.com/x", opts);
+    // 0 = esp_http_client's own DEFAULT_HTTP_BUF_SIZE.
+    TEST_ASSERT_EQUAL(0, MockHttpClient::lastConfig().buffer_size_tx);
+}
+
+void test_tx_buffer_hooks_override_courier_sizing() {
+    std::string auth = longBearer();
+    HttpTransport::FetchOptions::Header hdrs[] = {{"Authorization", auth.c_str()}};
+    HttpTransport::FetchOptions opts;
+    opts.headers = hdrs;
+    opts.headerCount = 1;
+
+    // The standing hook sees Courier's size and can replace it.
+    int seen = -1;
+    http->onConfigure([&seen](esp_http_client_config_t& cfg) {
+        seen = cfg.buffer_size_tx;
+        cfg.buffer_size_tx = 4096;
+    });
+    http->fetch("https://example.com/x", opts);
+    TEST_ASSERT_GREATER_THAN(DEFAULT_HTTP_BUF_SIZE, seen);
+    TEST_ASSERT_EQUAL(4096, MockHttpClient::lastConfig().buffer_size_tx);
+
+    // The per-call hook runs last and wins.
+    opts.configure = [](esp_http_client_config_t& cfg) {
+        cfg.buffer_size_tx = 8192;
+    };
+    http->fetch("https://example.com/x", opts);
+    TEST_ASSERT_EQUAL(8192, MockHttpClient::lastConfig().buffer_size_tx);
+    http->onConfigure(nullptr);
+}
+
 static std::string g_rawReply;
 static void rawReplyHook(const char* payload, size_t len) {
     g_rawReply.assign(payload, len);
@@ -700,6 +854,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_fetch_head_response_no_body);
     RUN_TEST(test_fetch_truncated_body_flags_incomplete);
     RUN_TEST(test_fetch_buffered_redirect_delivers_only_final_hop);
+    RUN_TEST(test_fetch_redirect_without_body_drops_its_headers);
     RUN_TEST(test_streaming_redirect_delivers_only_final_hop_chunks);
     RUN_TEST(test_fetch_final_redirect_not_followed_has_no_body);
     RUN_TEST(test_fetch_final_redirect_with_body_still_complete);
@@ -709,6 +864,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_retry_on_transport_failure_then_success);
     RUN_TEST(test_all_retries_exhausted_returns_last_error);
     RUN_TEST(test_http_error_status_never_retries);
+    RUN_TEST(test_fetch_429_exposes_retry_after);
+    RUN_TEST(test_retry_after_comes_from_the_final_hop_only);
     RUN_TEST(test_retries_zero_disables);
     RUN_TEST(test_per_call_retries_override_config);
     RUN_TEST(test_timeout_classification);
@@ -722,6 +879,10 @@ int main(int argc, char** argv) {
     RUN_TEST(test_onconfigure_then_percall_layering);
     RUN_TEST(test_reserved_fields_survive_trapdoors);
     RUN_TEST(test_per_call_timeout_overrides_config);
+    RUN_TEST(test_mock_long_header_overflows_default_tx_buffer);
+    RUN_TEST(test_tx_buffer_fits_long_header_and_long_url);
+    RUN_TEST(test_tx_buffer_small_request_keeps_idf_default);
+    RUN_TEST(test_tx_buffer_hooks_override_courier_sizing);
     RUN_TEST(test_send_posts_json_to_endpoint);
     RUN_TEST(test_send_nondefault_port_in_url);
     RUN_TEST(test_send_json_reply_dispatches_on_loop);
