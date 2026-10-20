@@ -232,6 +232,32 @@ void test_fetch_buffered_redirect_delivers_only_final_hop() {
     TEST_ASSERT_EQUAL_STRING("Tue, 18 Feb 2026 12:05:00 GMT", r.header("Date"));
 }
 
+void test_fetch_redirect_without_body_drops_its_headers() {
+    // A redirect commonly says Content-Length: 0 and sends no body; the final
+    // response here is chunked, so it sends no Content-Length of its own.
+    MockHttpClient::ScriptStep step;
+    MockHttpClient::Hop hop1;
+    hop1.status = 302;
+    hop1.headers = {{"Content-Length", "0"},
+                    {"Date", "Tue, 18 Feb 2026 12:00:00 GMT"},
+                    {"Retry-After", "30"},
+                    {"Location", "https://example.com/final"}};
+    step.redirectHops = {hop1};
+    step.status = 200;
+    step.contentLength = -1;
+    step.headers = {{"Content-Type", "application/json"},
+                    {"Date", "Tue, 18 Feb 2026 12:05:00 GMT"}};
+    step.bodyChunks = {"{\"ok\":true}"};
+    MockHttpClient::pushScript(step);
+
+    Response r = http->fetch("https://example.com/start");
+    TEST_ASSERT_EQUAL(200, r.status);
+    TEST_ASSERT_EQUAL_STRING("{\"ok\":true}", r.text());
+    TEST_ASSERT_NULL(r.header("Content-Length"));
+    TEST_ASSERT_NULL(r.header("Retry-After"));
+    TEST_ASSERT_EQUAL_STRING("Tue, 18 Feb 2026 12:05:00 GMT", r.header("Date"));
+}
+
 void test_streaming_redirect_delivers_only_final_hop_chunks() {
     MockHttpClient::ScriptStep step;
     MockHttpClient::Hop hop1;
@@ -733,6 +759,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_fetch_head_response_no_body);
     RUN_TEST(test_fetch_truncated_body_flags_incomplete);
     RUN_TEST(test_fetch_buffered_redirect_delivers_only_final_hop);
+    RUN_TEST(test_fetch_redirect_without_body_drops_its_headers);
     RUN_TEST(test_streaming_redirect_delivers_only_final_hop_chunks);
     RUN_TEST(test_fetch_final_redirect_not_followed_has_no_body);
     RUN_TEST(test_fetch_final_redirect_with_body_still_complete);

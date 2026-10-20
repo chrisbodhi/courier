@@ -6,6 +6,10 @@
 
 - `Response::header("Retry-After")`: the response's `Retry-After`, as the server sent it (delta-seconds or an HTTP date), or `nullptr` when absent. A caller can now wait as a `429 Too Many Requests` or `503 Service Unavailable` asks.
 
+### Fixed
+
+- `HttpTransport::fetch()`: a redirect that sends no body no longer leaks its headers into the final `Response`. The collected headers (`Content-Type`, `Content-Length`, `Date`, `Retry-After`) were cleared between hops only once a hop had delivered body data, so, for example, a `302` with `Content-Length: 0` followed by a chunked `200` reported `header("Content-Length")` as `"0"`. A new hop now starts at `esp_http_client`'s `HTTP_EVENT_ON_FINISH`, which it sends at the end of every hop on IDF 4.4 and 5.x.
+
 ---
 
 ## v0.9.2
