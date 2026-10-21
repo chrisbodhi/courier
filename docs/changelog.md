@@ -4,7 +4,8 @@
 
 ### Fixed
 
-- `HttpTransport::fetch()` preserves a parsed non-2xx response when `esp_http_client_perform()` rejects it after receiving the current hop's headers, such as an IDF 5.5 `401` with an unsupported authentication scheme. A body-less `2xx` interrupted before its first byte, and a stale redirect status left behind when the next hop cannot connect, remain transport errors and retain the existing retry behavior.
+- `HttpTransport::fetch()` returns the status the server sent when `esp_http_client_perform()` fails after reading the response's headers. IDF 5.x fails it for a `401` it cannot answer with credentials (`ESP_ERR_NOT_SUPPORTED`, whether or not the response carries `WWW-Authenticate`), for a redirect it will not follow (no `Location`, or `https` to `http`), and for a response whose connection closes before its body arrives (`ESP_ERR_HTTP_INCOMPLETE_DATA`). Each was reported as `Http::ErrConnect` and retried, with DNS flushes, until the retries ran out, and a streaming caller's `onResponse` never fired: a `401` whose body came after its headers reached the caller as `-1002`. A non-2xx status of the current hop is now the response, and `onResponse` fires for it. A `2xx` with no body bytes, and the `3xx` a finished redirect leaves behind when the next hop fails to connect, are still transport errors and still retried. ([#30](https://github.com/inanimate-tech/courier/issues/30))
+- `Response::complete()` says whether the whole body arrived when `perform()` failed after the headers. It was `false` for a response whose whole body came in the same read as its headers, and `true` for one whose body was never read (a non-2xx on IDF 4.4 with `disable_auto_redirect`). It now compares the body bytes received with `Content-Length`, and is `false` when the length is unknown. A `3xx` stays complete, as when `perform()` succeeds: its body is never kept.
 
 ## v0.10.0
 

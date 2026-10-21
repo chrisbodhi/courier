@@ -436,7 +436,9 @@ void test_http_error_status_never_retries() {
     TEST_ASSERT_EQUAL(0, dnsFlushCountForTests);
 }
 
-void test_status_survives_perform_error_after_headers() {
+void test_fetch_401_refused_by_client_keeps_status() {
+    // IDF 5.x refuses a 401 it cannot answer with credentials after reading
+    // the headers and before reading the body.
     MockHttpClient::ScriptStep unauthorized;
     unauthorized.performResult = ESP_ERR_NOT_SUPPORTED;
     unauthorized.status = 401;
@@ -444,53 +446,124 @@ void test_status_survives_perform_error_after_headers() {
     unauthorized.headers = {{"Content-Type", "application/json"}};
     MockHttpClient::pushScript(unauthorized);
 
-    g_streamEvents.clear();
-    HttpTransport::FetchOptions opts;
-    opts.retries = 0;
-    opts.onResponse = [](int status, long len) {
-        g_streamEvents.push_back("meta:" + std::to_string(status) + ":" +
-                                 std::to_string(len));
-    };
-    opts.onBody = [](const uint8_t*, size_t) { return true; };
-    Response r = http->fetch("https://example.com/private", opts);
-
+    Response r = http->fetch("https://example.com/private");
     TEST_ASSERT_EQUAL(401, r.status);
-    TEST_ASSERT_EQUAL(1, (int)g_streamEvents.size());
-    TEST_ASSERT_EQUAL_STRING("meta:401:18", g_streamEvents[0].c_str());
+    TEST_ASSERT_TRUE(r.reachedServer());
+    TEST_ASSERT_FALSE(r.complete());        // 18 bytes promised, none read
+    TEST_ASSERT_EQUAL_STRING("", r.text());
+    TEST_ASSERT_EQUAL(18, (int)r.contentLength);
+    TEST_ASSERT_EQUAL_STRING("application/json", r.header("Content-Type"));
     TEST_ASSERT_EQUAL(1, MockHttpClient::performCount());
     TEST_ASSERT_EQUAL(0, dnsFlushCountForTests);
 }
 
-void test_bodyless_success_status_does_not_mask_transport_error() {
-    MockHttpClient::ScriptStep dropped;
-    dropped.performResult = ESP_FAIL;
-    dropped.status = 200;
-    MockHttpClient::pushScript(dropped);
+void test_fetch_401_body_read_with_headers_is_complete() {
+    // Body bytes in the same read as the headers reach the handler before
+    // perform() refuses the 401, so the whole body can already be in.
+    MockHttpClient::ScriptStep unauthorized;
+    unauthorized.performResult = ESP_ERR_NOT_SUPPORTED;
+    unauthorized.status = 401;
+    unauthorized.bodyChunks = {"{\"error\":\"denied\"}"};
+    MockHttpClient::pushScript(unauthorized);
 
-    HttpTransport::FetchOptions opts;
-    opts.retries = 0;
-    Response r = http->fetch("https://example.com/api", opts);
-
-    TEST_ASSERT_EQUAL(Http::ErrConnect, r.status);
+    Response r = http->fetch("https://example.com/private");
+    TEST_ASSERT_EQUAL(401, r.status);
+    TEST_ASSERT_TRUE(r.complete());
+    TEST_ASSERT_EQUAL_STRING("{\"error\":\"denied\"}", r.text());
     TEST_ASSERT_EQUAL(1, MockHttpClient::performCount());
 }
 
-void test_finished_redirect_status_does_not_mask_next_hop_failure() {
+void test_streaming_401_refused_by_client_fires_onresponse_once() {
+    MockHttpClient::ScriptStep unauthorized;
+    unauthorized.performResult = ESP_ERR_NOT_SUPPORTED;
+    unauthorized.status = 401;
+    unauthorized.contentLength = 18;
+    MockHttpClient::pushScript(unauthorized);
+
+    g_streamEvents.clear();
+    HttpTransport::FetchOptions opts;
+    opts.onResponse = [](int status, long len) {
+        g_streamEvents.push_back("meta:" + std::to_string(status) + ":" +
+                                 std::to_string(len));
+    };
+    opts.onBody = [](const uint8_t*, size_t) {
+        g_streamEvents.push_back("data");
+        return true;
+    };
+    Response r = http->fetch("https://example.com/private", opts);
+    TEST_ASSERT_EQUAL(401, r.status);
+    TEST_ASSERT_FALSE(r.complete());
+    TEST_ASSERT_EQUAL(1, (int)g_streamEvents.size());
+    TEST_ASSERT_EQUAL_STRING("meta:401:18", g_streamEvents[0].c_str());
+    TEST_ASSERT_EQUAL(1, MockHttpClient::performCount());
+}
+
+void test_fetch_error_status_cut_off_before_body_is_incomplete() {
+    // IDF 5.x returns ESP_ERR_HTTP_INCOMPLETE_DATA when the connection
+    // closes before Content-Length bytes arrive.
+    MockHttpClient::ScriptStep unavailable;
+    unavailable.performResult = ESP_ERR_HTTP_INCOMPLETE_DATA;
+    unavailable.status = 503;
+    unavailable.contentLength = 100;
+    unavailable.headers = {{"Retry-After", "7"}};
+    MockHttpClient::pushScript(unavailable);
+
+    Response r = http->fetch("https://example.com/api");
+    TEST_ASSERT_EQUAL(503, r.status);
+    TEST_ASSERT_FALSE(r.complete());
+    TEST_ASSERT_EQUAL_STRING("7", r.header("Retry-After"));
+    TEST_ASSERT_EQUAL(1, MockHttpClient::performCount());   // a real status
+    TEST_ASSERT_EQUAL(0, dnsFlushCountForTests);
+}
+
+void test_fetch_redirect_refused_by_client_keeps_3xx() {
+    // IDF 5.x will not follow a redirect with no Location, or from https to
+    // http; perform() fails after the 3xx's headers.
+    MockHttpClient::ScriptStep downgrade;
+    downgrade.performResult = ESP_ERR_HTTP_REDIRECT_DOWNGRADE;
+    downgrade.status = 302;
+    downgrade.contentLength = 0;
+    downgrade.headers = {{"Location", "http://example.com/plain"}};
+    MockHttpClient::pushScript(downgrade);
+
+    Response r = http->fetch("https://example.com/start");
+    TEST_ASSERT_EQUAL(302, r.status);
+    TEST_ASSERT_TRUE(r.complete());
+    TEST_ASSERT_EQUAL(1, MockHttpClient::performCount());
+}
+
+void test_fetch_success_status_without_body_is_retried() {
+    // A 2xx with no body bytes may be a connection that died after the
+    // status line: a transport error, so the next attempt runs.
     MockHttpClient::ScriptStep dropped;
-    dropped.performResult = ESP_FAIL;
-    dropped.status = 302;  // stale status reported after the next hop fails
+    dropped.performResult = ESP_ERR_HTTP_INCOMPLETE_DATA;
+    dropped.status = 200;
+    dropped.contentLength = 100;
+    MockHttpClient::pushScript(dropped);
+
+    Response r = http->fetch("https://example.com/api");
+    TEST_ASSERT_EQUAL(200, r.status);           // the retry's response
+    TEST_ASSERT_EQUAL_STRING("{}", r.text());
+    TEST_ASSERT_EQUAL(2, MockHttpClient::performCount());
+    TEST_ASSERT_EQUAL(1, dnsFlushCountForTests);
+}
+
+void test_fetch_redirect_whose_next_hop_fails_is_retried() {
+    // The 302 hop finished; the next hop never connected, and
+    // esp_http_client still reports the 302.
+    MockHttpClient::ScriptStep dropped;
+    dropped.performResult = ESP_ERR_HTTP_CONNECT;
+    dropped.status = 302;
     MockHttpClient::Hop redirect;
     redirect.status = 302;
     redirect.headers = {{"Location", "https://example.com/final"}};
     dropped.redirectHops = {redirect};
     MockHttpClient::pushScript(dropped);
 
-    HttpTransport::FetchOptions opts;
-    opts.retries = 0;
-    Response r = http->fetch("https://example.com/start", opts);
-
-    TEST_ASSERT_EQUAL(Http::ErrConnect, r.status);
-    TEST_ASSERT_EQUAL(1, MockHttpClient::performCount());
+    Response r = http->fetch("https://example.com/start");
+    TEST_ASSERT_EQUAL(200, r.status);           // the retry's response
+    TEST_ASSERT_EQUAL(2, MockHttpClient::performCount());
+    TEST_ASSERT_EQUAL(1, dnsFlushCountForTests);
 }
 
 void test_retries_zero_disables() {
@@ -923,9 +996,13 @@ int main(int argc, char** argv) {
     RUN_TEST(test_http_error_status_never_retries);
     RUN_TEST(test_fetch_429_exposes_retry_after);
     RUN_TEST(test_retry_after_comes_from_the_final_hop_only);
-    RUN_TEST(test_status_survives_perform_error_after_headers);
-    RUN_TEST(test_bodyless_success_status_does_not_mask_transport_error);
-    RUN_TEST(test_finished_redirect_status_does_not_mask_next_hop_failure);
+    RUN_TEST(test_fetch_401_refused_by_client_keeps_status);
+    RUN_TEST(test_fetch_401_body_read_with_headers_is_complete);
+    RUN_TEST(test_streaming_401_refused_by_client_fires_onresponse_once);
+    RUN_TEST(test_fetch_error_status_cut_off_before_body_is_incomplete);
+    RUN_TEST(test_fetch_redirect_refused_by_client_keeps_3xx);
+    RUN_TEST(test_fetch_success_status_without_body_is_retried);
+    RUN_TEST(test_fetch_redirect_whose_next_hop_fails_is_retried);
     RUN_TEST(test_retries_zero_disables);
     RUN_TEST(test_per_call_retries_override_config);
     RUN_TEST(test_timeout_classification);
