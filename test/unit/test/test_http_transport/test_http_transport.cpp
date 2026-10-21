@@ -436,6 +436,63 @@ void test_http_error_status_never_retries() {
     TEST_ASSERT_EQUAL(0, dnsFlushCountForTests);
 }
 
+void test_status_survives_perform_error_after_headers() {
+    MockHttpClient::ScriptStep unauthorized;
+    unauthorized.performResult = ESP_ERR_NOT_SUPPORTED;
+    unauthorized.status = 401;
+    unauthorized.contentLength = 18;
+    unauthorized.headers = {{"Content-Type", "application/json"}};
+    MockHttpClient::pushScript(unauthorized);
+
+    g_streamEvents.clear();
+    HttpTransport::FetchOptions opts;
+    opts.retries = 0;
+    opts.onResponse = [](int status, long len) {
+        g_streamEvents.push_back("meta:" + std::to_string(status) + ":" +
+                                 std::to_string(len));
+    };
+    opts.onBody = [](const uint8_t*, size_t) { return true; };
+    Response r = http->fetch("https://example.com/private", opts);
+
+    TEST_ASSERT_EQUAL(401, r.status);
+    TEST_ASSERT_EQUAL(1, (int)g_streamEvents.size());
+    TEST_ASSERT_EQUAL_STRING("meta:401:18", g_streamEvents[0].c_str());
+    TEST_ASSERT_EQUAL(1, MockHttpClient::performCount());
+    TEST_ASSERT_EQUAL(0, dnsFlushCountForTests);
+}
+
+void test_bodyless_success_status_does_not_mask_transport_error() {
+    MockHttpClient::ScriptStep dropped;
+    dropped.performResult = ESP_FAIL;
+    dropped.status = 200;
+    MockHttpClient::pushScript(dropped);
+
+    HttpTransport::FetchOptions opts;
+    opts.retries = 0;
+    Response r = http->fetch("https://example.com/api", opts);
+
+    TEST_ASSERT_EQUAL(Http::ErrConnect, r.status);
+    TEST_ASSERT_EQUAL(1, MockHttpClient::performCount());
+}
+
+void test_finished_redirect_status_does_not_mask_next_hop_failure() {
+    MockHttpClient::ScriptStep dropped;
+    dropped.performResult = ESP_FAIL;
+    dropped.status = 302;  // stale status reported after the next hop fails
+    MockHttpClient::Hop redirect;
+    redirect.status = 302;
+    redirect.headers = {{"Location", "https://example.com/final"}};
+    dropped.redirectHops = {redirect};
+    MockHttpClient::pushScript(dropped);
+
+    HttpTransport::FetchOptions opts;
+    opts.retries = 0;
+    Response r = http->fetch("https://example.com/start", opts);
+
+    TEST_ASSERT_EQUAL(Http::ErrConnect, r.status);
+    TEST_ASSERT_EQUAL(1, MockHttpClient::performCount());
+}
+
 void test_retries_zero_disables() {
     MockHttpClient::ScriptStep fail;
     fail.performResult = ESP_ERR_HTTP_CONNECT;
@@ -866,6 +923,9 @@ int main(int argc, char** argv) {
     RUN_TEST(test_http_error_status_never_retries);
     RUN_TEST(test_fetch_429_exposes_retry_after);
     RUN_TEST(test_retry_after_comes_from_the_final_hop_only);
+    RUN_TEST(test_status_survives_perform_error_after_headers);
+    RUN_TEST(test_bodyless_success_status_does_not_mask_transport_error);
+    RUN_TEST(test_finished_redirect_status_does_not_mask_next_hop_failure);
     RUN_TEST(test_retries_zero_disables);
     RUN_TEST(test_per_call_retries_override_config);
     RUN_TEST(test_timeout_classification);

@@ -352,25 +352,25 @@ Response HttpTransport::performOnce(const char* url, const FetchOptions& opts,
         return resp;
     }
 
-    if (err == ESP_ERR_HTTP_MAX_REDIRECT && status >= 100) {
-        // The server answered; the client just refused to (or could no
-        // longer) follow a redirect. On IDF 4.4, disable_auto_redirect makes
-        // perform() return this for ANY non-2xx status — after the status
-        // line and headers were parsed (IDF 5.x reports the 3xx as a normal
-        // response instead). Either way the response is real: report it so
-        // callers (e.g. the time-sync probe reading a 301's Date header) can
-        // use it, and the retry loop doesn't re-roll on a reachable server.
+    bool non2xx = status < 200 || status >= 300;
+    if (status >= 100 && !ctx.hopFinished && (non2xx || ctx.sawBody)) {
+        // The current hop produced a usable response even though
+        // esp_http_client rejected it. A non-2xx status may be the response
+        // itself (for example IDF 5.5 rejecting an unsupported 401 auth
+        // scheme); body bytes prove a 2xx response reached the server. Do not
+        // trust a status left by a finished redirect hop, or a body-less 2xx:
+        // both can accompany a later connection failure and must be retried
+        // as transport errors.
         resp.status = status;
         resp.contentLength = clen;
+        if (ctx.sawBody) {
+            // Connection dropped after delivering only part of the body.
+            resp._complete = false;
+            return resp;
+        }
         if (ctx.streaming && !ctx.responseFired && opts.onResponse) {
             opts.onResponse(status, clen);
         }
-        return resp;
-    }
-    if (status >= 100 && ctx.sawBody) {
-        // Connection dropped mid-body after a real status arrived.
-        resp.status = status;
-        resp._complete = false;
         return resp;
     }
     resp.status = (err == ESP_ERR_HTTP_FETCH_HEADER) ? Http::ErrTimeout

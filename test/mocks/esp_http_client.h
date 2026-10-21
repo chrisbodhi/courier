@@ -20,6 +20,9 @@ typedef int esp_err_t;
 #ifndef ESP_FAIL
 #define ESP_FAIL -1
 #endif
+#ifndef ESP_ERR_NOT_SUPPORTED
+#define ESP_ERR_NOT_SUPPORTED 0x106
+#endif
 
 #define ESP_ERR_HTTP_BASE         0x7000
 #define ESP_ERR_HTTP_MAX_REDIRECT (ESP_ERR_HTTP_BASE + 1)

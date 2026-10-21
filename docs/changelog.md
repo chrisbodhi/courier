@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `HttpTransport::fetch()` preserves a parsed non-2xx response when `esp_http_client_perform()` rejects it after receiving the current hop's headers, such as an IDF 5.5 `401` with an unsupported authentication scheme. A body-less `2xx` interrupted before its first byte, and a stale redirect status left behind when the next hop cannot connect, remain transport errors and retain the existing retry behavior.
+
 ## v0.10.0
 
 ### New
