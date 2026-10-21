@@ -190,7 +190,7 @@ struct HttpTransport::FetchCtx {
     size_t cap = 0;
     bool streaming = false;
     bool responseFired = false;
-    bool sawBody = false;
+    size_t bodyBytes = 0;      // this hop's body, buffered or streamed
     bool hopFinished = false;  // ON_FINISH: the next ON_HEADER is a new hop
     bool tooLarge = false;
     bool aborted = false;
@@ -210,7 +210,7 @@ esp_err_t HttpTransport::eventHandler(esp_http_client_event_t* evt)
             // don't bleed into (or concatenate with) the new hop's response.
             ctx->resp->resetForNewHop();
             ctx->responseFired = false;
-            ctx->sawBody = false;
+            ctx->bodyBytes = 0;
             ctx->hopFinished = false;
         }
         ctx->resp->captureHeader(evt->header_key, evt->header_value);
@@ -236,7 +236,7 @@ esp_err_t HttpTransport::eventHandler(esp_http_client_event_t* evt)
             // the caller sees status + headers + an empty body.
             break;
         }
-        ctx->sawBody = true;
+        ctx->bodyBytes += (size_t)evt->data_len;
         if (ctx->streaming) {
             if (ctx->opts->onBody &&
                 !ctx->opts->onBody((const uint8_t*)evt->data,
@@ -352,21 +352,29 @@ Response HttpTransport::performOnce(const char* url, const FetchOptions& opts,
         return resp;
     }
 
-    bool non2xx = status < 200 || status >= 300;
-    if (status >= 100 && !ctx.hopFinished && (non2xx || ctx.sawBody)) {
-        // The current hop produced a usable response even though
-        // esp_http_client rejected it. A non-2xx status may be the response
-        // itself (for example IDF 5.5 rejecting an unsupported 401 auth
-        // scheme); body bytes prove a 2xx response reached the server. Do not
-        // trust a status left by a finished redirect hop, or a body-less 2xx:
-        // both can accompany a later connection failure and must be retried
-        // as transport errors.
+    // perform() failed, but the server may still have answered. The status
+    // is this hop's only while hopFinished is clear: esp_http_client keeps
+    // the last parsed status until the next hop's headers are read, so when
+    // a finished redirect hop's successor fails to connect it still holds
+    // the 3xx. A non-2xx of this hop is the server's answer, body or no
+    // body: IDF 4.4 with disable_auto_redirect returns
+    // ESP_ERR_HTTP_MAX_REDIRECT for every non-2xx (the time-sync probe reads
+    // a 301's Date header), and IDF 5.x returns an error for a 401 it cannot
+    // answer with credentials (ESP_ERR_NOT_SUPPORTED, with or without
+    // WWW-Authenticate), a redirect it will not follow (no Location, or an
+    // https-to-http downgrade) and a body cut short
+    // (ESP_ERR_HTTP_INCOMPLETE_DATA). A 2xx is the answer only once body
+    // bytes arrived; without them the connection may have died after the
+    // status line, and that is a transport error, retried.
+    bool isSuccess = status >= 200 && status < 300;
+    if (status >= 100 && !ctx.hopFinished && (!isSuccess || ctx.bodyBytes > 0)) {
         resp.status = status;
         resp.contentLength = clen;
-        if (ctx.sawBody) {
-            // Connection dropped after delivering only part of the body.
+        // Whole only if every promised byte arrived before the failure. A
+        // 3xx body is never kept, so a 3xx is whole, as on the ESP_OK path.
+        bool isRedirectStatus = status >= 300 && status < 400;
+        if (!isRedirectStatus && (clen < 0 || ctx.bodyBytes != (size_t)clen)) {
             resp._complete = false;
-            return resp;
         }
         if (ctx.streaming && !ctx.responseFired && opts.onResponse) {
             opts.onResponse(status, clen);
