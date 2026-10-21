@@ -352,20 +352,14 @@ Response HttpTransport::performOnce(const char* url, const FetchOptions& opts,
         return resp;
     }
 
-    // perform() failed, but the server may still have answered. The status
-    // is this hop's only while hopFinished is clear: esp_http_client keeps
-    // the last parsed status until the next hop's headers are read, so when
-    // a finished redirect hop's successor fails to connect it still holds
-    // the 3xx. A non-2xx of this hop is the server's answer, body or no
-    // body: IDF 4.4 with disable_auto_redirect returns
-    // ESP_ERR_HTTP_MAX_REDIRECT for every non-2xx (the time-sync probe reads
-    // a 301's Date header), and IDF 5.x returns an error for a 401 it cannot
-    // answer with credentials (ESP_ERR_NOT_SUPPORTED, with or without
-    // WWW-Authenticate), a redirect it will not follow (no Location, or an
-    // https-to-http downgrade) and a body cut short
-    // (ESP_ERR_HTTP_INCOMPLETE_DATA). A 2xx is the answer only once body
-    // bytes arrived; without them the connection may have died after the
-    // status line, and that is a transport error, retried.
+    // perform() can fail after the server answered. The status counts only
+    // for this hop (hopFinished clear): when a finished redirect's next hop
+    // fails to connect, esp_http_client still reports the 3xx. A non-2xx is
+    // the answer, body or no body: IDF 4.4 with disable_auto_redirect fails
+    // every non-2xx (the time-sync probe reads a 301's Date), and IDF 5.x
+    // fails a 401 it can't answer, a redirect it won't follow and a body cut
+    // short. A 2xx counts only once body bytes arrived; without them the
+    // connection may have died after the status line, so it is retried.
     bool isSuccess = status >= 200 && status < 300;
     if (status >= 100 && !ctx.hopFinished && (!isSuccess || ctx.bodyBytes > 0)) {
         resp.status = status;
