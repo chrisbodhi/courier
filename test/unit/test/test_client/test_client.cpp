@@ -282,6 +282,50 @@ void test_multiple_large_string_fields() {
     TEST_ASSERT_EQUAL_STRING(b.c_str(), gotB.c_str());
 }
 
+// Allocator that fails every allocation after the first `limit`.
+struct LimitedAllocator : ArduinoJson::Allocator {
+    int count = 0, limit = 1 << 30;
+    void* allocate(size_t n) override { return ++count > limit ? nullptr : malloc(n); }
+    void deallocate(void* p) override { free(p); }
+    void* reallocate(void* p, size_t n) override {
+        return ++count > limit ? nullptr : realloc(p, n);
+    }
+};
+
+// Linking a large value in after the parse allocates (the member, its key).
+// If that fails the message must be dropped, not delivered without its
+// largest field.
+void test_link_allocation_failure_drops_message() {
+    std::string frame = "{\"channel\":\"system\",\"type\":\"app\",\"code\":\"" +
+                        std::string(600, 'x') + "\"}";
+    LimitedAllocator alloc;
+    Courier::dispatchAllocatorForTests = &alloc;
+    std::string gotCode;
+    int delivered = 0;
+    courier->setDefaultTransport("ws");
+    courier->onMessage([&](const char*, const char*, JsonDocument& doc) {
+        delivered++;
+        gotCode = doc["code"] | "";
+    });
+    advanceToConnected();
+    auto* mock = MockWebSocketClient::lastInstance();
+
+    // Unlimited: count what a successful dispatch allocates.
+    mock->simulateTextMessage(frame.c_str());
+    courier->loop();
+    TEST_ASSERT_EQUAL(1, delivered);
+    TEST_ASSERT_EQUAL(600, gotCode.size());
+    int needed = alloc.count;
+
+    // Fail only the last allocation: the key copy made while linking.
+    alloc.count = 0;
+    alloc.limit = needed - 1;
+    mock->simulateTextMessage(frame.c_str());
+    courier->loop();
+    Courier::dispatchAllocatorForTests = nullptr;
+    TEST_ASSERT_EQUAL(1, delivered);  // not delivered a second time
+}
+
 void test_suspend_resume() {
     advanceToConnected();
 
@@ -1173,6 +1217,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_short_string_fields_are_copied);
     RUN_TEST(test_large_string_with_invalid_escape_is_dropped);
     RUN_TEST(test_multiple_large_string_fields);
+    RUN_TEST(test_link_allocation_failure_drops_message);
     RUN_TEST(test_suspend_resume);
     RUN_TEST(test_on_error_callback_registered);
     RUN_TEST(test_connection_change_fires_on_setup);
